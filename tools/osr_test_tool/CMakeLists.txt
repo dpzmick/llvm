@@ -1,0 +1,23 @@
+set(LLVM_LINK_COMPONENTS
+  CodeGen
+  Core
+  ExecutionEngine
+  IRReader
+  Instrumentation
+  Interpreter
+  MC
+  MCJIT
+  Object
+  OrcJIT
+  RuntimeDyld
+  SelectionDAG
+  Support
+  Target
+  TransformUtils
+  native
+  )
+
+add_llvm_tool(osr_test_tool
+  osr_test_tool.cpp
+  )
+export_executable_symbols(osr_test_tool)
