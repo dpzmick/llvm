@@ -50,6 +50,4 @@ namespace llvm {
   };
 }
 
-INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass);
-
 #endif

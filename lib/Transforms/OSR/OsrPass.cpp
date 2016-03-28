@@ -1,6 +1,3 @@
-#include "OsrPass.h"
-#include "Liveness.hpp"
-
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LegacyPassManager.h"
@@ -8,16 +5,18 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
+#include "llvm/Transforms/OSR/OsrPass.h"
 
 #include <iostream>
+
+#define DEBUG_TYPE "OsrPass"
+#define LOG_HEADER DEBUG_TYPE << "::" << __func__ << " "
 
 using namespace llvm;
 
 char OsrPass::ID = 0;
 static RegisterPass<OsrPass> X("osrpass", "osr stuff");
 
-#define DEBUG_TYPE "OsrPass"
-#define LOG_HEADER DEBUG_TYPE << "::" << __func__ << " "
 
 void OsrPass::addOsrConditionCounterGE(Value &counter,
                                        uint64_t limit,

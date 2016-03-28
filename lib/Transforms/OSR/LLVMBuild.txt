@@ -1,4 +1,4 @@
-;===- ./lib/Transforms/LLVMBuild.txt ---------------------------*- Conf -*--===;
+;===- ./lib/Transforms/Scalar/LLVMBuild.txt --------------------*- Conf -*--===;
 ;
 ;                     The LLVM Compiler Infrastructure
 ;
@@ -15,10 +15,9 @@
 ;
 ;===------------------------------------------------------------------------===;
 
-[common]
-subdirectories = IPO InstCombine Instrumentation Scalar Utils Vectorize ObjCARC OSR
-
 [component_0]
-type = Group
-name = Transforms
-parent = Libraries
+type = Library
+name = OSR
+parent = Transforms
+library_name = OsrOpts
+required_libraries = Analysis Core Support
