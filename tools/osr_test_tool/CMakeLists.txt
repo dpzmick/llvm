@@ -15,6 +15,7 @@ set(LLVM_LINK_COMPONENTS
   Target
   TransformUtils
   native
+  Osr
   )
 
 add_llvm_tool(osr_test_tool

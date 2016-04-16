@@ -17,7 +17,6 @@ using namespace llvm;
 char OsrPass::ID = 0;
 static RegisterPass<OsrPass> X("osrpass", "osr stuff");
 
-
 void OsrPass::addOsrConditionCounterGE(Value &counter,
                                        uint64_t limit,
                                        BasicBlock &BB,

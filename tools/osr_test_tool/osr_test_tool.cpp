@@ -11,8 +11,21 @@
 // which allow the direct execution of LLVM programs through a Just-In-Time
 // compiler, or through an interpreter if no JIT is available for this platform.
 //
+// It runs some OSR passes before it executes the code.
+//
 //===----------------------------------------------------------------------===//
 
+#include "llvm/Transforms/OSR/OsrPass.h"
+#include "llvm/ADT/STLExtras.h"
+#include "llvm/Analysis/Passes.h"
+#include "llvm/IR/IRBuilder.h"
+#include "llvm/IR/LLVMContext.h"
+#include "llvm/IR/LegacyPassManager.h"
+#include "llvm/IR/Module.h"
+#include "llvm/IR/Verifier.h"
+#include "llvm/Support/TargetSelect.h"
+#include "llvm/Transforms/Scalar.h"
+#include "llvm/Analysis/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
 #include "llvm/ExecutionEngine/Interpreter.h"
@@ -22,6 +35,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IRReader/IRReader.h"
 #include "llvm/Support/ManagedStatic.h"
 #include "llvm/Support/TargetSelect.h"
@@ -30,17 +44,17 @@
 #include "llvm/Support/SourceMgr.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cerrno>
+#include <assert.h>
 
 using namespace llvm;
 
 #define DEBUG_TYPE "osr_test_tool"
 
-//===----------------------------------------------------------------------===//
-// main Driver function
-//
 int main(int argc, char **argv, char * const *envp) {
   sys::PrintStackTraceOnErrorSignal();
   PrettyStackTraceProgram X(argc, argv);
+
+  assert(1 && "what");
 
   LLVMContext &Context = getGlobalContext();
 
@@ -65,27 +79,31 @@ int main(int argc, char **argv, char * const *envp) {
     exit(1);
   }
 
-
-  // can't use owner anymore, we've moved it
   auto Main = Mod->getFunction("main");
   if (!Main) {
     Err.print(argv[0], errs());
     return 1;
   }
 
+  // make a pass manager
+  auto PM = llvm::make_unique<legacy::PassManager>();
+  PM->add(createPromoteMemoryToRegisterPass());
+  PM->add(createInstructionCombiningPass());
+  PM->add(createReassociatePass());
+  PM->add(createGVNPass());
+  PM->add(createCFGSimplificationPass());
+  PM->add(new OsrPass());
+  PM->run(*Mod);
+
+  errs() << *Mod << "\n";
+
   // Now we create the JIT.
   ExecutionEngine* EE = EngineBuilder(std::move(Owner)).create();
   EE->generateCodeForModule(Mod);
+  EE->finalizeObject();
 
-  // even for things like malloc this fails
-  int (*ptr)() = ( int (*)() ) EE->getFunctionAddress("malloc");
-  errs() << "ptr is: " << (void*)ptr << "\n"; // this is always null
-  errs() << *Main << "\n";
-  errs() << *Mod << "\n";
-
-  errs() << ptr() << "\n";
-
-  errs() << "made it\n";
+  std::vector<GenericValue> args;
+  errs() << "res: " << EE->runFunction(Main, args).IntVal << "\n";
 
   return 0;
 }

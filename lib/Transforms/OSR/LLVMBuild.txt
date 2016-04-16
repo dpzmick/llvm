@@ -17,7 +17,7 @@
 
 [component_0]
 type = Library
-name = OSR
+name = Osr
 parent = Transforms
 library_name = OsrOpts
 required_libraries = Analysis Core Support

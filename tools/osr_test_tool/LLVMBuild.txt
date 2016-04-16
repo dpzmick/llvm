@@ -30,3 +30,9 @@ required_libraries =
  NativeCodeGen
  SelectionDAG
  TransformUtils
+ Osr
+ Instrumentation
+ Scalar
+ ObjCARC
+ Passes
+
