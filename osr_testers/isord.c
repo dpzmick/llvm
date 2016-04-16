@@ -17,7 +17,7 @@ int main() {
   void* a = malloc(1); free(a);
   printf("running isord test\n");
   assert(isord(arr, 100,c) == 1);
-  assert(isord(arr, 1001,c) == -1000);
+  assert( isord(arr, 1001,c) == -1000);
   printf("passed\n");
 }
 

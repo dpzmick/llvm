@@ -28,7 +28,7 @@
 #include "llvm/Analysis/Passes.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ExecutionEngine/GenericValue.h"
-#include "llvm/ExecutionEngine/Interpreter.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/IRBuilder.h"
@@ -73,6 +73,7 @@ int main(int argc, char **argv, char * const *envp) {
     return 1;
   }
 
+
   if (std::error_code EC = Mod->materializeAll()) {
     errs() << argv[0] << ": bitcode didn't read correctly.\n";
     errs() << "Reason: " << EC.message() << "\n";
@@ -93,14 +94,19 @@ int main(int argc, char **argv, char * const *envp) {
   PM->add(createGVNPass());
   PM->add(createCFGSimplificationPass());
   PM->add(new OsrPass());
+  PM->add(createDeadCodeEliminationPass());
   PM->run(*Mod);
+
+  // Now we create the JIT.
+  auto InitialModule = llvm::make_unique<Module>("empty", Context);
+  ExecutionEngine* EE = EngineBuilder(std::move(InitialModule)).create();
+  Owner->setDataLayout(EE->getDataLayout());
+  EE->addModule(std::move(Owner));
+  EE->generateCodeForModule(Mod);
+  EE->finalizeObject();
 
   errs() << *Mod << "\n";
 
-  // Now we create the JIT.
-  ExecutionEngine* EE = EngineBuilder(std::move(Owner)).create();
-  EE->generateCodeForModule(Mod);
-  EE->finalizeObject();
 
   std::vector<GenericValue> args;
   errs() << "res: " << EE->runFunction(Main, args).IntVal << "\n";

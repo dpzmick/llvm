@@ -17,6 +17,11 @@ using namespace llvm;
 char OsrPass::ID = 0;
 static RegisterPass<OsrPass> X("osrpass", "osr stuff");
 
+static int doSomethingFunny() {
+  printf("something funny\n");
+  return -1000;
+}
+
 void OsrPass::addOsrConditionCounterGE(Value &counter,
                                        uint64_t limit,
                                        BasicBlock &BB,
@@ -82,8 +87,18 @@ bool OsrPass::runOnFunction( Function &F )
     // it will at least help to establish the machinery we need
   }
 
-  // TODO return whatever we get from the osr call
-  OsrBuilder.CreateRet(OsrBuilder.getInt32(-1000));
+  // create the type for the function
+  ArrayRef<Type*> noargs;
+  auto fptype = FunctionType::get(Type::getInt32Ty(F.getContext()), noargs, false);
+
+  Constant* destFunGenVal = ConstantExpr::getIntToPtr(
+      ConstantInt::get(Type::getInt64Ty(F.getContext()),
+                       (uintptr_t)&doSomethingFunny),
+                       PointerType::getUnqual(fptype));
+
+  ArrayRef<Value*> empty;
+  auto ret = OsrBuilder.CreateCall(destFunGenVal, empty);
+  OsrBuilder.CreateRet(ret);
   return true;
 }
 
