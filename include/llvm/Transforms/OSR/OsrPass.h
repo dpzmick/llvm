@@ -6,6 +6,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/Dominators.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
 
 #include <memory>
 
@@ -24,7 +25,7 @@ namespace llvm {
   class OsrPass : public ModulePass {
   public:
     static char ID; // Pass identification
-    OsrPass() : ModulePass(ID) { }
+    inline OsrPass(ExecutionEngine *EE) : ModulePass(ID), EE(EE){ }
 
     bool runOnModule(Module&) override;
 
@@ -35,6 +36,7 @@ namespace llvm {
     }
 
   private:
+    ExecutionEngine* EE;
 
     // adds a loop counter to a loop
     // this should become it's own loop pass or something (doesn't seem to already

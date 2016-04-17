@@ -6,6 +6,8 @@
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/OSR/OsrPass.h"
+#include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/ExecutionEngine/MCJIT.h"
 
 #include <iostream>
 
@@ -15,11 +17,39 @@
 using namespace llvm;
 
 char OsrPass::ID = 0;
-static RegisterPass<OsrPass> X("osrpass", "osr stuff");
+// static RegisterPass<OsrPass> X("osrpass", "osr stuff");
 
-static int doSomethingFunny() {
-  printf("something funny\n");
-  return -1000;
+// cant get llvm to cooperate with my pass register if I put an argument
+// INITIALIZE_PASS_BEGIN(OsrPass, "osrpass", "osr stuff", false, false)
+// INITIALIZE_PASS_END(OsrPass, "osrpass", "osr stuff", false, false)
+
+static void* doSomethingFunny(Function* F, ExecutionEngine* EE) {
+  std::cout << "made it into do something funky\n";
+
+  Module* M = new Module("funky_mod", getGlobalContext());
+
+  ArrayRef<Type*> cont_args_types;
+  auto cont_ret      = Type::getInt32Ty(getGlobalContext());
+  auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
+
+  auto NF = dyn_cast<Function>(M->getOrInsertFunction("new_f", cont_type));
+  auto block = BasicBlock::Create(getGlobalContext(), "entry", NF);
+  IRBuilder<> builder(block);
+
+  // TODO copy function and run an optimization pass
+
+  // return the -1000 thing so the "test" passes
+  builder.CreateRet(ConstantInt::get(Type::getInt32Ty(getGlobalContext()), -1000));
+
+  std::unique_ptr<Module> uniq(M);
+  EE->addModule(std::move(uniq));
+  EE->generateCodeForModule(M);
+  EE->finalizeObject();
+
+  auto fp = EE->getPointerToFunctionOrStub(NF);
+  assert(fp);
+
+  return (void*)fp;
 }
 
 void OsrPass::addOsrConditionCounterGE(Value &counter,
@@ -70,35 +100,53 @@ bool OsrPass::runOnFunction( Function &F )
   for (auto &Loop : LI) {
     Value * counter = instrumentLoopWithCounters(*Loop);
     addOsrConditionCounterGE(*counter, 1000, *Loop->getHeader(), *osrBB);
-
-    // TODO set up osr + function call here
-    // I've had a ton of trouble with this
-    //
-    // a simple test with resolved osr:
-    // - create a version of the function at compile time, pass it through a
-    //   bunch of opt passes. (copy the function, modify it to pick up where the
-    //   loop would have left off (change args))
-    // - optimize the new function heavily
-    // - emit both of these functions in the module
-    // - at run time, when the counter is tripped, switch to the optimized
-    //   version
-    //
-    // This is essentially resolved osr. Doesn't really do anything useful but
-    // it will at least help to establish the machinery we need
   }
 
-  // create the type for the function
-  ArrayRef<Type*> noargs;
-  auto fptype = FunctionType::get(Type::getInt32Ty(F.getContext()), noargs, false);
+  auto getIntPtr = [&](uintptr_t ptr) {
+    return ConstantInt::get(Type::getInt64Ty(F.getContext()), ptr);
+  };
 
-  Constant* destFunGenVal = ConstantExpr::getIntToPtr(
-      ConstantInt::get(Type::getInt64Ty(F.getContext()),
-                       (uintptr_t)&doSomethingFunny),
-                       PointerType::getUnqual(fptype));
+  auto voidPtr = Type::getInt8PtrTy(F.getContext());
 
-  ArrayRef<Value*> empty;
-  auto ret = OsrBuilder.CreateCall(destFunGenVal, empty);
-  OsrBuilder.CreateRet(ret);
+  // types for continuation func
+  ArrayRef<Type*> cont_args_types;
+  std::vector<Value*> cont_args_values;
+  auto cont_ret      = Type::getInt32Ty(F.getContext());
+  auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
+  auto cont_ptr_type = PointerType::getUnqual(cont_type);
+
+  // types for stub
+  // for now, stub takes a i8* (void*) and returns a cont_func ptr
+  std::vector<Type*> stub_args_types;
+  stub_args_types.push_back(voidPtr);
+  stub_args_types.push_back(voidPtr);
+
+  std::vector<Value*> stub_args_values;
+  stub_args_values.push_back(
+      OsrBuilder.CreateIntToPtr(
+        getIntPtr((uintptr_t)F.getParent()),
+        stub_args_types[0]));
+
+  stub_args_values.push_back(
+      OsrBuilder.CreateIntToPtr(
+        getIntPtr((uintptr_t)EE),
+        stub_args_types[1]
+        ));
+
+  auto stub_ret      = Type::getInt8PtrTy(F.getContext());
+  auto stub_type     = FunctionType::get(stub_ret, stub_args_types, false);
+  auto stub_ptr_type = PointerType::getUnqual(stub_type);
+
+  // get the stub ptr
+  auto stub_int_val = getIntPtr((uintptr_t)doSomethingFunny);
+
+  auto stub_ptr    = OsrBuilder.CreateIntToPtr(stub_int_val, stub_ptr_type);
+  auto stub_result = OsrBuilder.CreateCall(stub_ptr, stub_args_values);
+
+  auto cont_ptr = OsrBuilder.CreatePointerCast(stub_result, cont_ptr_type);
+  auto cont_result = OsrBuilder.CreateCall(cont_ptr, cont_args_values);
+
+  OsrBuilder.CreateRet(cont_result);
   return true;
 }
 

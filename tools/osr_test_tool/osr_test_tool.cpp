@@ -86,6 +86,11 @@ int main(int argc, char **argv, char * const *envp) {
     return 1;
   }
 
+  // Now we create the JIT.
+  auto InitialModule = llvm::make_unique<Module>("empty", Context);
+  ExecutionEngine* EE = EngineBuilder(std::move(InitialModule)).create();
+  Owner->setDataLayout(EE->getDataLayout());
+
   // make a pass manager
   auto PM = llvm::make_unique<legacy::PassManager>();
   PM->add(createPromoteMemoryToRegisterPass());
@@ -93,20 +98,15 @@ int main(int argc, char **argv, char * const *envp) {
   PM->add(createReassociatePass());
   PM->add(createGVNPass());
   PM->add(createCFGSimplificationPass());
-  PM->add(new OsrPass());
+  PM->add(new OsrPass(EE));
   PM->add(createDeadCodeEliminationPass());
   PM->run(*Mod);
 
-  // Now we create the JIT.
-  auto InitialModule = llvm::make_unique<Module>("empty", Context);
-  ExecutionEngine* EE = EngineBuilder(std::move(InitialModule)).create();
-  Owner->setDataLayout(EE->getDataLayout());
   EE->addModule(std::move(Owner));
   EE->generateCodeForModule(Mod);
   EE->finalizeObject();
 
   errs() << *Mod << "\n";
-
 
   std::vector<GenericValue> args;
   errs() << "res: " << EE->runFunction(Main, args).IntVal << "\n";
