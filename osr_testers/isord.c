@@ -3,9 +3,11 @@
 #include <assert.h>
 
 int isord(long* v, long n, int (*c)(void* a, void* b)) {
+  int var_that_should_be_live = n + n;
     for (long i=1; i<n; i++)
         if (c(v+i-1,v+i)>0) return 0;
-    return 1;
+
+    return 1; // var_that_should_be_live;
 }
 
 int c(void *a, void *b) {

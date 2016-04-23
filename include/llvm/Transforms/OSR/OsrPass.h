@@ -46,7 +46,7 @@ namespace llvm {
 
     // adds an conditional to the end of the given basic block, which will jump
     // to the osr basic block if the condition is true.
-    void addOsrConditionCounterGE(Value&, uint64_t, BasicBlock&, BasicBlock&);
+    Instruction* addOsrConditionCounterGE(Value&, uint64_t, BasicBlock&, BasicBlock&);
 
     bool runOnFunction(Function&);
   };
