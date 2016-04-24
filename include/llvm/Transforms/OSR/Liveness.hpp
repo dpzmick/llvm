@@ -74,6 +74,8 @@ class LivenessAnalysis {
         /// \brief Print a LiveValues object to an output stream
         friend std::ostream &operator<<(std::ostream &sin, const LivenessAnalysis::LiveValues &values);
 
+        LiveValues getLiveValsAtInstr(const llvm::Instruction*);
+
     private:
         typedef std::pair<LiveValues, LiveValues> LiveInAndOutValues;
         typedef std::map<const llvm::BasicBlock*, LiveInAndOutValues> BlockToLiveValuesMap;

@@ -174,6 +174,12 @@ std::ostream &operator<<(std::ostream &sin, const LivenessAnalysis::LiveValues &
     return sin;
 }
 
+LivenessAnalysis::LiveValues LivenessAnalysis::getLiveValsAtInstr(const Instruction* I) {
+    const BasicBlock* B = I->getParent();
+    LivenessAnalysis::LiveValues &liveOutAtB = getLiveOutValues(B);
+    return LivenessAnalysis::analyzeLiveInForSeq(B, liveOutAtB, I, nullptr);
+}
+
 /*
  * OSR library for LLVM. Copyright (C) 2015 Daniele Cono D'Elia
  *

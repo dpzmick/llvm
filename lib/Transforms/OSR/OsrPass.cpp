@@ -19,182 +19,110 @@
 using namespace llvm;
 
 char OsrPass::ID = 0;
-// static RegisterPass<OsrPass> X("osrpass", "osr stuff");
 
-// cant get llvm to cooperate with my pass register if I put an argument
-// INITIALIZE_PASS_BEGIN(OsrPass, "osrpass", "osr stuff", false, false)
-// INITIALIZE_PASS_END(OsrPass, "osrpass", "osr stuff", false, false)
-//
-static Function *printf_prototype(LLVMContext &ctx, Module *mod) {
-  FunctionType *printf_type =
-      TypeBuilder<int(char *, ...), false>::get(getGlobalContext());
-
-  Function *func = cast<Function>(mod->getOrInsertFunction(
-      "printf", printf_type,
-      AttributeSet().addAttribute(mod->getContext(), 1U, Attribute::NoAlias)));
-
-  return func;
+ModulePass* llvm::createOsrPassPass(ExecutionEngine* EE) {
+  return new OsrPass(EE);
 }
 
-Constant* geti8StrVal(Module& M, char const* str, Twine const& name) {
-  LLVMContext& ctx = getGlobalContext();
-  Constant* strConstant = ConstantDataArray::getString(ctx, str);
-  GlobalVariable* GVStr =
-      new GlobalVariable(M, strConstant->getType(), true,
-                         GlobalValue::InternalLinkage, strConstant, name);
-  Constant* zero = Constant::getNullValue(IntegerType::getInt32Ty(ctx));
-  Constant* indices[] = {zero, zero};
-  Constant* strVal = ConstantExpr::getGetElementPtr(strConstant->getType(), GVStr, indices, true);
-  return strVal;
-}
+INITIALIZE_PASS_BEGIN(OsrPass, "osr", "osr", false, false)
+INITIALIZE_PASS_END(OsrPass, "osr", "osr", false, false)
 
-static void* doSomethingFunny(Function* F, ExecutionEngine* EE, Instruction* osrcond) {
-  std::cout << "made it into do something funky\n";
-  errs() << *F << "\n";
+static void* generator(Function* F, ExecutionEngine* EE,
+                       Instruction* osr_point, std::set<const Value*>* vars)
+{
+  //Module* M = new Module("funky_mod", getGlobalContext());
+  errs() << *F;
+  errs() << *osr_point << "\n";
 
-  LivenessAnalysis live(F);
-  std::cout << "live at instruction: " << live.getLiveOutValues(osrcond->getParent());
+  errs() << "size: " << vars->size() << "\n";
 
-  // restart the loop with the live variables set
-  Module* M = new Module("funky_mod", getGlobalContext());
-
-  std::vector<Type*> cont_args_types;
-  for (auto lv : live.getLiveOutValues(osrcond->getParent())) {
-    cont_args_types.push_back(lv->getType());
+  size_t count = 0;
+  for (const auto& k : *vars) {
+    errs() << *k << "\n";
+    errs() << ++count << "\n\n";
   }
 
-  auto cont_ret      = Type::getInt32Ty(getGlobalContext());
-  auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
+  errs() << "\n\nI'm free\n\n";
 
-  auto NF = dyn_cast<Function>(M->getOrInsertFunction("new_f", cont_type));
-  auto block = BasicBlock::Create(getGlobalContext(), "entry", NF);
-  IRBuilder<> builder(block);
-
-  // TODO copy function and run an optimization pass
-  auto printf_fun = printf_prototype(NF->getParent()->getContext(), NF->getParent());
-
-  Constant* c = geti8StrVal(*NF->getParent(), "liveness arg wow %d\n", "printstr");
-  for (auto &arg : NF->getArgumentList()) {
-    std::vector<Value*> args;
-    args.push_back(c);
-    args.push_back(&arg);
-    builder.CreateCall(printf_fun, args);
-  }
-
-  // return the -1000 thing so the "test" passes
-  builder.CreateRet(ConstantInt::get(Type::getInt32Ty(getGlobalContext()), -1000));
-
-  errs() << *M << "\n";
-
-  std::unique_ptr<Module> uniq(M);
-  EE->addModule(std::move(uniq));
-  EE->generateCodeForModule(M);
-  EE->finalizeObject();
-
-  auto fp = EE->getPointerToFunctionOrStub(NF);
-  assert(fp);
-
-  return (void*)fp;
+  return (void*)nullptr;
 }
 
-Instruction* OsrPass::addOsrConditionCounterGE(Value &counter,
-                                       uint64_t limit,
-                                       BasicBlock &BB,
-                                       BasicBlock &OsrBB)
-{
-  DEBUG(errs() << LOG_HEADER << "entered\n");
-
-  // insert new osr condition instructions after this
-  BasicBlock::iterator insertPoint = BB.getFirstInsertionPt();
-
-  DEBUG(errs() << LOG_HEADER << "splitting loop at " << *insertPoint << "\n");
-  auto newBB = BB.splitBasicBlock(insertPoint, "loop.cont");
-
-  // start building the osr condition
-  IRBuilder<> Builder(&BB);
-  auto term = BB.getTerminator();
-  term->eraseFromParent();
-
-  auto osr_cond = Builder.CreateICmpSGE(&counter, Builder.getInt64(limit), "osr.cond");
-  return Builder.CreateCondBr(osr_cond, &OsrBB, newBB);
-}
-
-// need this to be a function pass so I can add the osr block
-bool OsrPass::runOnModule( Module &M )
-{
-  DEBUG(errs() << LOG_HEADER << "entered\n");
-
+// need this to be a function pass so I can add the osr block to the module.
+// if this is a function pass, the pass gets run on any modules that are added,
+// so this becomes infinite loop
+bool OsrPass::runOnModule( Module &M ) {
+  bool flag = false;
   for (auto &F : M) {
-    runOnFunction(F);
+    flag = flag || runOnFunction(F);
   }
-
-  return true;
+  return flag;
 }
 
 bool OsrPass::runOnFunction( Function &F )
 {
-  DEBUG(errs() << LOG_HEADER << "entered\n");
-
   if (F.isDeclaration()) return false;
 
   LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
 
+  errs() << F << "\n\n";
+
+  // the vars at the end of this loop's header are the relevant live variables
+  // we need to get these before we start adding new things to the function
+  LivenessAnalysis live(&F);
+  auto relevantLiveVars = new std::set<const Value*>();
+  for (auto &Loop : LI) {
+    for (auto var : live.getLiveOutValues(Loop->getHeader())) {
+      relevantLiveVars->insert(var);
+      errs() << "adding: " << *var << "\n";
+    }
+  }
+
+  errs() << "presize: " << relevantLiveVars->size() << "\n";
+  errs() << F << "\n\n";
+
+  // now that we have the important information from the original function, we
+  // are going to start fiddling around with it
+
   // TODO will need an osr block for each loop in the function
   BasicBlock* osrBB = BasicBlock::Create(getGlobalContext(), "osr", &F);
   IRBuilder<> OsrBuilder(osrBB);
-  // TODO assuming that the function returns an int
-  // adding an empty return so that we can run live var analysis without it
-  // blowing up
-  Instruction* bullshitReturn = OsrBuilder.CreateRet(ConstantInt::get(F.getReturnType(), 0));
 
-
-  // TODO assuming single condition added
   Instruction* cond = nullptr;
   for (auto &Loop : LI) {
     Value* counter = instrumentLoopWithCounters(*Loop);
     cond = addOsrConditionCounterGE(*counter, 1000, *Loop->getHeader(), *osrBB);
   }
+  errs() << F << "\n\n";
 
-  if (!cond) {
-    return false;
-  }
+  if (!cond) return false;
 
-  // make this here so it runs on the function which includes the newly added
-  // counter
-  LivenessAnalysis live(&F);
-
-  // okay we can get rid of this now
-  bullshitReturn->removeFromParent();
-
+  // create the osr stub code
   auto getIntPtr = [&](uintptr_t ptr) {
     return ConstantInt::get(Type::getInt64Ty(F.getContext()), ptr);
   };
-
   auto voidPtr = Type::getInt8PtrTy(F.getContext());
 
   // now we need to get an fp to a new function which takes all of our live vars
   // as args and returns the same thing as the original function.
   // we return the result of a call to this function
-  auto relevantLive = live.getLiveOutValues(cond->getParent());
 
   // types for continuation func
   std::vector<Type*> cont_args_types;
-  for (auto v : relevantLive) {
+  for (auto v : *relevantLiveVars) {
     cont_args_types.push_back(v->getType());
   }
 
   std::vector<Value*> cont_args_values;
-  for (auto v : relevantLive) {
-    cont_args_values.push_back(const_cast<Value*>(v)); // fuck the rules
+  for (auto v : *relevantLiveVars) {
+    cont_args_values.push_back(const_cast<Value*>(v));
   }
 
   auto cont_ret      = Type::getInt32Ty(F.getContext());
   auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
   auto cont_ptr_type = PointerType::getUnqual(cont_type);
 
-  // types for stub
-  // for now, stub takes a i8* (void*) and returns a cont_func ptr
   std::vector<Type*> stub_args_types;
+  stub_args_types.push_back(voidPtr);
   stub_args_types.push_back(voidPtr);
   stub_args_types.push_back(voidPtr);
   stub_args_types.push_back(voidPtr);
@@ -211,10 +139,15 @@ bool OsrPass::runOnFunction( Function &F )
         stub_args_types[1]
         ));
 
-  // memory leek
   stub_args_values.push_back(
       OsrBuilder.CreateIntToPtr(
         getIntPtr((uintptr_t)cond),
+        stub_args_types[1]
+        ));
+
+  stub_args_values.push_back(
+      OsrBuilder.CreateIntToPtr(
+        getIntPtr((uintptr_t)relevantLiveVars),
         stub_args_types[1]
         ));
 
@@ -222,23 +155,36 @@ bool OsrPass::runOnFunction( Function &F )
   auto stub_type     = FunctionType::get(stub_ret, stub_args_types, false);
   auto stub_ptr_type = PointerType::getUnqual(stub_type);
 
-  // get the stub ptr
-  auto stub_int_val = getIntPtr((uintptr_t)doSomethingFunny);
-
+  auto stub_int_val = getIntPtr((uintptr_t)generator);
   auto stub_ptr    = OsrBuilder.CreateIntToPtr(stub_int_val, stub_ptr_type);
   auto stub_result = OsrBuilder.CreateCall(stub_ptr, stub_args_values);
 
   auto cont_ptr = OsrBuilder.CreatePointerCast(stub_result, cont_ptr_type);
   auto cont_result = OsrBuilder.CreateCall(cont_ptr, cont_args_values);
 
+  errs() << F << "\n\n";
   OsrBuilder.CreateRet(cont_result);
   return true;
 }
 
+Instruction* OsrPass::addOsrConditionCounterGE(Value &counter,
+                                               uint64_t limit,
+                                               BasicBlock &BB,
+                                               BasicBlock &OsrBB)
+{
+  BasicBlock::iterator insertPoint = BB.getFirstInsertionPt();
+  auto newBB = BB.splitBasicBlock(insertPoint, "loop.cont");
+
+  IRBuilder<> Builder(&BB);
+  auto term = BB.getTerminator();
+  term->eraseFromParent();
+
+  auto osr_cond = Builder.CreateICmpSGE(&counter, Builder.getInt64(limit), "osr.cond");
+  return Builder.CreateCondBr(osr_cond, &OsrBB, newBB);
+}
+
 Value* OsrPass::instrumentLoopWithCounters( Loop &L )
 {
-  DEBUG(errs() << LOG_HEADER << "entered\n");
-
   // TODO try to use getCanonicalInductionVariable
   // maybe just return that if this works
 

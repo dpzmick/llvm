@@ -25,13 +25,13 @@ namespace llvm {
   class OsrPass : public ModulePass {
   public:
     static char ID; // Pass identification
-    inline OsrPass(ExecutionEngine *EE) : ModulePass(ID), EE(EE){ }
+    explicit inline OsrPass(ExecutionEngine *EE = nullptr) : ModulePass(ID), EE(EE)
+    { assert(EE); }
 
     bool runOnModule(Module&) override;
 
     inline void getAnalysisUsage(AnalysisUsage &AU) const override {
       AU.addRequired<LoopInfoWrapperPass>();
-      AU.addPreserved<LoopInfoWrapperPass>();
       ModulePass::getAnalysisUsage(AU);
     }
 
@@ -49,7 +49,11 @@ namespace llvm {
     Instruction* addOsrConditionCounterGE(Value&, uint64_t, BasicBlock&, BasicBlock&);
 
     bool runOnFunction(Function&);
+
   };
+
+  ModulePass* createOsrPassPass(ExecutionEngine* EE);
+  void initializeOsrPassPass(PassRegistry&);
 }
 
 #endif

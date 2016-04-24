@@ -98,7 +98,7 @@ int main(int argc, char **argv, char * const *envp) {
   PM->add(createReassociatePass());
   PM->add(createGVNPass());
   PM->add(createCFGSimplificationPass());
-  PM->add(new OsrPass(EE));
+  PM->add(createOsrPassPass(EE));
   PM->add(createDeadCodeEliminationPass());
   PM->run(*Mod);
 
