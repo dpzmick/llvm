@@ -1,6 +1,7 @@
 #include "llvm/Analysis/LoopInfo.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/TypeBuilder.h"
+#include "llvm/IR/ValueMap.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/Cloning.h"
@@ -25,24 +26,86 @@ ModulePass* llvm::createOsrPassPass(ExecutionEngine* EE) {
 }
 
 INITIALIZE_PASS_BEGIN(OsrPass, "osr", "osr", false, false)
+INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_END(OsrPass, "osr", "osr", false, false)
+
+OsrPass::OsrPass(ExecutionEngine *EE)
+: ModulePass(ID),
+  EE(EE)
+{
+  assert(EE);
+  initializeOsrPassPass(*PassRegistry::getPassRegistry());
+}
 
 static void* generator(Function* F, ExecutionEngine* EE,
                        Instruction* osr_point, std::set<const Value*>* vars)
 {
-  //Module* M = new Module("funky_mod", getGlobalContext());
   errs() << *F;
   errs() << *osr_point << "\n";
 
-  errs() << "size: " << vars->size() << "\n";
-
-  size_t count = 0;
-  for (const auto& k : *vars) {
-    errs() << *k << "\n";
-    errs() << ++count << "\n\n";
+  // new function type
+  std::vector<Type*> argsty;
+  for (const auto& v : *vars) {
+    argsty.push_back(v->getType());
   }
 
-  errs() << "\n\nI'm free\n\n";
+  FunctionType* ft = FunctionType::get(F->getReturnType(), argsty, false);
+
+  errs() << "ft: " << *ft << "\n";
+
+  Module* M = new Module("funky_mod", getGlobalContext());
+  Function* NF = dyn_cast<Function>(M->getOrInsertFunction("new_f", ft));
+
+  ValueToValueMapTy osrContArgs;
+  auto it = NF->arg_begin();
+  for (const Value* v : *vars) {
+    osrContArgs[v] = &*(it++);
+  }
+  assert(it == NF->arg_end());
+
+  SmallVector<ReturnInst*, 16> returns;
+  CloneFunctionInto(NF, F, osrContArgs, true, returns);
+
+  size_t cutoff = F->getArgumentList().size();
+  errs() << "need to skip the first " << cutoff << " elements\n";
+
+  // now we need to handle the rest of the new arguments
+  auto arg = NF->arg_begin();
+  size_t count = 0;
+  for (const auto& v : *vars) {
+    count++;
+    if (count <= cutoff) {
+      // don't replace something with itself, trying to do so is an error and
+      // causes an assertion failure
+      errs() << "skipping " << *osrContArgs[v] << "\n";
+      arg++;
+      continue;
+    }
+
+    for (const auto& user : osrContArgs[v]->users()) {
+      errs() << *osrContArgs[v] << " is used " << *user << "\n";
+    }
+
+    // if the inst is a phi, replace it's initial value with the incoming value
+    if (PHINode* phi = dyn_cast<PHINode>(osrContArgs[v])) {
+      errs() << "phi node, replacing incoming edge with incoming arg\n";
+      int idx = phi->getBasicBlockIndex(&NF->getEntryBlock());
+      phi->setIncomingValue(idx, &*arg);
+    } else {
+      // else, replace all uses with the incoming value
+      errs() << "trying to replace all uses of " << *osrContArgs[v] << " with " << *arg << "\n";
+      osrContArgs[v]->replaceAllUsesWith(&*(arg++));
+    }
+  }
+
+  // remove the osr condition (tinyvm people do the same thing in their
+  // generator)
+  // run a function inlining pass
+  // add the new module to the EE
+  // run the compiler in the EE
+  // return a pointer to the new function
+
+  errs() << "newfunc:\n\n" << *NF << "\n";
 
   return (void*)nullptr;
 }
@@ -73,6 +136,9 @@ bool OsrPass::runOnFunction( Function &F )
   for (auto &Loop : LI) {
     for (auto var : live.getLiveOutValues(Loop->getHeader())) {
       relevantLiveVars->insert(var);
+      for (const auto& user : var->users()) {
+        errs() << *var << " is used in " << *user << "\n";
+      }
       errs() << "adding: " << *var << "\n";
     }
   }

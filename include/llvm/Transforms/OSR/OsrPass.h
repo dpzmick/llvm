@@ -25,8 +25,7 @@ namespace llvm {
   class OsrPass : public ModulePass {
   public:
     static char ID; // Pass identification
-    explicit inline OsrPass(ExecutionEngine *EE = nullptr) : ModulePass(ID), EE(EE)
-    { assert(EE); }
+    explicit OsrPass(ExecutionEngine *EE = nullptr);
 
     bool runOnModule(Module&) override;
 

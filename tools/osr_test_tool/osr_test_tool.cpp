@@ -89,17 +89,18 @@ int main(int argc, char **argv, char * const *envp) {
   // Now we create the JIT.
   auto InitialModule = llvm::make_unique<Module>("empty", Context);
   ExecutionEngine* EE = EngineBuilder(std::move(InitialModule)).create();
+  EE->getTargetMachine()->setOptLevel(CodeGenOpt::None); // !important
+  // if we let the target machine optimize, it might modify the module and break
+  // the hackery that makes the osr possible
   Owner->setDataLayout(EE->getDataLayout());
 
   // make a pass manager
   auto PM = llvm::make_unique<legacy::PassManager>();
   PM->add(createPromoteMemoryToRegisterPass());
   PM->add(createInstructionCombiningPass());
-  PM->add(createReassociatePass());
-  PM->add(createGVNPass());
   PM->add(createCFGSimplificationPass());
   PM->add(createOsrPassPass(EE));
-  PM->add(createDeadCodeEliminationPass());
+  //PM->add(createDeadCodeEliminationPass());
   PM->run(*Mod);
 
   EE->addModule(std::move(Owner));
