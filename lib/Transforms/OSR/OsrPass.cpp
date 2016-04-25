@@ -2,15 +2,20 @@
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/TypeBuilder.h"
 #include "llvm/IR/ValueMap.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
-#include "llvm/Transforms/OSR/OsrPass.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
+#include "llvm/Transforms/Utils/Local.h"
+#include "llvm/Transforms/Utils/SSAUpdater.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
+#include "llvm/Transforms/OSR/OsrPass.h"
 #include "llvm/Transforms/OSR/Liveness.hpp"
+#include "llvm/Transforms/OSR/StateMap.hpp"
 
 #include <iostream>
 
@@ -37,77 +42,158 @@ OsrPass::OsrPass(ExecutionEngine *EE)
   initializeOsrPassPass(*PassRegistry::getPassRegistry());
 }
 
+static void removeOsrPoint(Instruction *src);
+static void correctSSA(Function *cont, Instruction *cont_lpad,
+		       std::vector<Value*> &values_to_set,
+		       ValueToValueMapTy &VMap,
+		       ValueToValueMapTy &VMap_updates,
+		       SmallVectorImpl<PHINode*> *inserted_PHI_nodes);
+		       
+
 static void* generator(Function* F, ExecutionEngine* EE,
                        Instruction* osr_point, std::set<const Value*>* vars)
 {
   errs() << *F;
   errs() << *osr_point << "\n";
 
-  // new function type
-  std::vector<Type*> argsty;
-  for (const auto& v : *vars) {
-    argsty.push_back(v->getType());
+  std::vector<Type*> arg_types;
+  for (const Value* v : *vars) {
+	  arg_types.push_back(v->getType());
   }
 
-  FunctionType* ft = FunctionType::get(F->getReturnType(), argsty, false);
 
-  errs() << "ft: " << *ft << "\n";
-
-  Module* M = new Module("funky_mod", getGlobalContext());
+  // Clone the previous function into the new one and create a state map between
+  // the two values.
+  // This isn't the function we're going to compile, just a temporary we copy
+  // the function into.
+  auto *ft = FunctionType::get(F->getReturnType(), arg_types, false);
+  std::unique_ptr<Module> M(new Module("funky_mod", getGlobalContext()));
   Function* NF = dyn_cast<Function>(M->getOrInsertFunction("new_f", ft));
-
-  ValueToValueMapTy osrContArgs;
+  ValueToValueMapTy VMap;
   auto it = NF->arg_begin();
   for (const Value* v : *vars) {
-    osrContArgs[v] = &*(it++);
+	  VMap[v] = &*(it++);
   }
-  assert(it == NF->arg_end());
-
   SmallVector<ReturnInst*, 16> returns;
-  CloneFunctionInto(NF, F, osrContArgs, true, returns);
+  CloneFunctionInto(NF, F, VMap, true, returns);
+  StateMap SM(F, NF, &VMap, true);
 
+  /*
   size_t cutoff = F->getArgumentList().size();
   errs() << "need to skip the first " << cutoff << " elements\n";
+  */
+  // Remove the OSR point in the new function.
+  auto *osr_point_cont = cast<Instruction>(SM.OneToOne[osr_point]);
+  errs() << "--------\n";
+  errs() << *osr_point_cont;
+  removeOsrPoint(osr_point_cont);
 
-  // now we need to handle the rest of the new arguments
-  auto arg = NF->arg_begin();
-  size_t count = 0;
-  for (const auto& v : *vars) {
-    count++;
-    if (count <= cutoff) {
-      // don't replace something with itself, trying to do so is an error and
-      // causes an assertion failure
-      errs() << "skipping " << *osrContArgs[v] << "\n";
-      arg++;
-      continue;
-    }
-
-    for (const auto& user : osrContArgs[v]->users()) {
-      errs() << *osrContArgs[v] << " is used " << *user << "\n";
-    }
-
-    // if the inst is a phi, replace it's initial value with the incoming value
-    if (PHINode* phi = dyn_cast<PHINode>(osrContArgs[v])) {
-      errs() << "phi node, replacing incoming edge with incoming arg\n";
-      int idx = phi->getBasicBlockIndex(&NF->getEntryBlock());
-      phi->setIncomingValue(idx, &*arg);
-    } else {
-      // else, replace all uses with the incoming value
-      errs() << "trying to replace all uses of " << *osrContArgs[v] << " with " << *arg << "\n";
-      osrContArgs[v]->replaceAllUsesWith(&*(arg++));
-    }
+  // TODO: random module name, use twine.
+  auto *CF = Function::Create(
+	  ft, NF->getLinkage(), Twine("osrcont_", NF->getName()), M.get());
+  // Set argument names and determine the values of the new arguments
+  ValueToValueMapTy args_to_cont_args;
+  auto cont_arg_it = CF->arg_begin();
+  for (const Value *v : *vars) {
+	  args_to_cont_args[v] = &*cont_arg_it;
+//	  args_to_cont_args.insert(std::pair<Value*, WeakVH>(v, &*cont_arg_it));
+	  if (v->hasName()) {
+		  (cont_arg_it++)->setName(Twine(v->getName(), "_osr"));
+	  } else {
+		  (cont_arg_it++)->setName(Twine("__osr"));
+	  }
   }
 
-  // remove the osr condition (tinyvm people do the same thing in their
-  // generator)
-  // run a function inlining pass
-  // add the new module to the EE
-  // run the compiler in the EE
-  // return a pointer to the new function
+  // Duplicate the body of F2 into the body of JF.
+  ValueToValueMapTy NF_to_CF_VMap;
+  for (auto BI = NF->begin(), BE = NF->end();
+       BI != BE;
+       ++BI) {
+	  auto *CBB = CloneBasicBlock(&*BI, NF_to_CF_VMap, "", CF, nullptr);
+	  NF_to_CF_VMap[&*BI] = CBB;
+	  if (BI->hasAddressTaken()) {
+		  Constant *prev_addr = BlockAddress::get(NF, &*BI);
+		  NF_to_CF_VMap[prev_addr] = BlockAddress::get(CF, CBB);
+	  }
+  }
 
-  errs() << "newfunc:\n\n" << *NF << "\n";
+  auto *lpad = SM.LandingPadMap[osr_point];
+  auto *cont_lpad = cast<Instruction>(NF_to_CF_VMap[lpad]);
 
-  return (void*)nullptr;
+  // Apply attributes
+  auto src_attrs = NF->getAttributes();
+  Function::arg_iterator arg_it = CF->arg_begin();
+  size_t arg_no = 1;
+  for (const Value *src : *vars) {
+	  Argument *arg = &*arg_it;
+	  arg_it++;
+	  if (isa<Argument>(src)) {
+		  auto attrs = src_attrs.getParamAttributes(arg_no);
+		  if (attrs.getNumSlots() > 0)
+			  arg->addAttr(attrs);
+		  arg_no++;
+	  }
+  }
+
+  // Generate a new entry point for the continuation function.
+  LivenessAnalysis live(NF);
+  auto live_vars = live.getLiveOutValues(lpad->getParent());
+  std::vector<Value*> values_to_set;
+  for (auto v : values_to_set) {
+	  values_to_set.push_back(v);
+  }
+
+  auto entry_point_pair = SM.genContinuationFunctionEntry(
+	  getGlobalContext(), osr_point, lpad, cont_lpad, values_to_set,
+	  args_to_cont_args);
+
+  auto *prev_entry = &CF->getEntryBlock();
+  auto *new_entry = entry_point_pair.first;
+  auto *NF_to_CF_changes = entry_point_pair.second;
+
+  // Undef dead arguments.
+  for (auto &dst : NF->args()) {
+	  auto it = NF_to_CF_changes->find(&dst);
+	  Value *v = ((it != NF_to_CF_changes->end())
+		      ? cast<Value>(&dst)                               // Live argument
+		      : cast<Value>(UndefValue::get(dst.getType())));   // Dead argument
+	  NF_to_CF_VMap[&dst] = v;
+	  //insert(std::pair<const Argument*, const Value*>(&dst, v));
+  }
+  
+  // Fix operand references
+  BasicBlock *begin = cast<BasicBlock>(NF_to_CF_VMap[&*NF->begin()]);
+  bool found = false;
+  for (Function::iterator BB = CF->begin(), BE = CF->end();
+       BB != BE;
+       ++BB) {
+	  // HORRIBLE HACK, I have no idea how to fix it.
+	  if (!found && &*BB == begin) {
+		  found = true;
+	  } else {
+		  continue;
+	  }
+	  for (auto II = BB->begin(); II != BB->end(); ++II)
+		  RemapInstruction(&*II, NF_to_CF_VMap, RF_NoModuleLevelChanges);
+  }
+  new_entry->insertInto(CF, prev_entry);
+
+  SmallVector<PHINode*, 8> inserted_phi_nodes;
+  correctSSA(CF, cont_lpad, values_to_set, NF_to_CF_VMap, *NF_to_CF_changes,
+	     &inserted_phi_nodes);
+  
+  errs() << "continuation function:\n\n" << *CF << "\n";
+
+  verifyFunction(*CF, &errs());
+  auto *mod = M.get();
+  auto PM = llvm::make_unique<legacy::PassManager>();
+  PM->add(createCFGSimplificationPass());
+  PM->run(*mod);
+  EE->addModule(std::move(M));
+  EE->generateCodeForModule(mod);
+  EE->finalizeObject();
+
+  return (void*)EE->getPointerToFunction(CF);
 }
 
 // need this to be a function pass so I can add the osr block to the module.
@@ -230,6 +316,7 @@ bool OsrPass::runOnFunction( Function &F )
 
   errs() << F << "\n\n";
   OsrBuilder.CreateRet(cont_result);
+  
   return true;
 }
 
@@ -247,6 +334,116 @@ Instruction* OsrPass::addOsrConditionCounterGE(Value &counter,
 
   auto osr_cond = Builder.CreateICmpSGE(&counter, Builder.getInt64(limit), "osr.cond");
   return Builder.CreateCondBr(osr_cond, &OsrBB, newBB);
+}
+
+// Remove OSR from tinyVM. I think this is pretty much the only way to do this.
+static void
+removeOsrPoint(Instruction *src)
+{
+	auto *splitBB = src->getParent();
+	if (src != &splitBB->getInstList().front())
+		return;
+	auto *predBB = splitBB->getSinglePredecessor();
+	if (predBB == nullptr)
+		return;
+	auto *TI = predBB->getTerminator();
+	if (BranchInst* BI = dyn_cast<BranchInst>(TI)) {
+		if (BI->getNumSuccessors() != 2)
+			return;
+		BasicBlock* FireOSRBlock = BI->getSuccessor(0);
+		FireOSRBlock->eraseFromParent();
+		TI->eraseFromParent();
+		BranchInst* brToSplitBB = BranchInst::Create(splitBB);
+		predBB->getInstList().push_back(brToSplitBB);
+		for (BasicBlock::reverse_iterator revIt = ++(predBB->rbegin()),
+			     revEnd = predBB->rend(); revIt != revEnd; ) {
+			Instruction *I = &*revIt;
+			if (isInstructionTriviallyDead(I, nullptr)) {
+				I->eraseFromParent();
+				revEnd = predBB->rend();
+			} else {
+				return;
+			}
+		}
+	}
+}
+
+static void
+correctSSA(Function *cont, Instruction *cont_lpad,
+	   std::vector<Value*> &values_to_set,
+	   ValueToValueMapTy &VMap,
+	   ValueToValueMapTy &VMap_updates,
+	   SmallVectorImpl<PHINode*> *inserted_PHI_nodes)
+{
+	auto *entry_point = &cont->getEntryBlock();
+	auto *lpad_block = cont_lpad->getParent();
+	bool lpad_is_first_non_phi = cont_lpad == lpad_block->getFirstNonPHI();
+	std::vector<Value*> work_queue;
+	BasicBlock *split_block;
+	if (lpad_is_first_non_phi) {
+		for (Value *orig : values_to_set) {
+			if (isa<Argument>(orig))
+				continue;
+			auto prev_inst = cast<Instruction>(VMap[orig]);
+			if (prev_inst->getParent() == lpad_block) {
+				if (PHINode *node =
+				    dyn_cast<PHINode>(prev_inst)) {
+					Value *next_value = VMap_updates[orig];
+					node->addIncoming(next_value,
+							  entry_point);
+					continue;
+				}
+			}
+			work_queue.push_back(orig);
+		}
+	} else {
+		for (Value *orig : values_to_set) {
+			if (!isa<Argument>(orig))
+				work_queue.push_back(orig);
+		}
+		split_block = lpad_block->splitBasicBlock(cont_lpad, "cont_split");
+		auto *BI = cast<BranchInst>(entry_point->getTerminator());
+		BI->setSuccessor(0, split_block);
+	}
+
+	if (work_queue.empty())
+		return;
+
+	SSAUpdater updater(inserted_PHI_nodes);
+	PHINode *last_inserted = nullptr;
+	if (lpad_is_first_non_phi)
+		split_block = lpad_block->splitBasicBlock(cont_lpad,
+							  "cont_split");
+	for (Value *orig : work_queue) {
+		Value *prev_value = VMap[orig];
+		auto *prev_inst = cast<Instruction>(VMap[orig]);
+		Value *next_value = VMap_updates[orig];
+		if (prev_value->hasName()) {
+			updater.Initialize(
+				prev_value->getType(), StringRef(
+					Twine(prev_value->getName(), "_fix")
+					.str()));
+		} else {
+			updater.Initialize(
+				prev_value->getType(), StringRef("__fix"));
+		}
+		updater.AddAvailableValue(prev_inst->getParent(), prev_value);
+		updater.AddAvailableValue(entry_point, next_value);
+
+		Value::use_iterator UE = prev_value->use_end();
+		for (Value::use_iterator UI = prev_value->use_begin(); UI != UE; ) {
+			Use &U = *(UI++);
+			updater.RewriteUseAfterInsertions(U);
+		}
+	}
+
+	if (lpad_is_first_non_phi) {
+		split_block->replaceAllUsesWith(lpad_block);
+		lpad_block->getInstList().back().eraseFromParent();
+		lpad_block->getInstList().splice(lpad_block->end(),
+						 split_block->getInstList());
+		split_block->eraseFromParent();
+	}
 }
 
 Value* OsrPass::instrumentLoopWithCounters( Loop &L )
