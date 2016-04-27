@@ -56,27 +56,26 @@ static void* generator(Function* F, ExecutionEngine* EE,
   errs() << *F;
   errs() << *osr_point << "\n";
 
-  std::vector<Type*> arg_types;
-  for (const Value* v : *vars) {
-	  arg_types.push_back(v->getType());
-  }
-
-
   // Clone the previous function into the new one and create a state map between
   // the two values.
   // This isn't the function we're going to compile, just a temporary we copy
   // the function into.
+  ValueToValueMapTy VMap;
+  auto *NF = CloneFunction(F, VMap, false);
+  StateMap SM(F, NF, &VMap, true);
+  /*
   auto *ft = FunctionType::get(F->getReturnType(), arg_types, false);
   std::unique_ptr<Module> M(new Module("funky_mod", getGlobalContext()));
   Function* NF = dyn_cast<Function>(M->getOrInsertFunction("new_f", ft));
-  ValueToValueMapTy VMap;
+  */
+  /*
   auto it = NF->arg_begin();
   for (const Value* v : *vars) {
 	  VMap[v] = &*(it++);
   }
   SmallVector<ReturnInst*, 16> returns;
   CloneFunctionInto(NF, F, VMap, true, returns);
-  StateMap SM(F, NF, &VMap, true);
+  */
 
   /*
   size_t cutoff = F->getArgumentList().size();
@@ -88,7 +87,14 @@ static void* generator(Function* F, ExecutionEngine* EE,
   errs() << *osr_point_cont;
   removeOsrPoint(osr_point_cont);
 
+  std::vector<Type*> arg_types;
+  for (const Value* v : *vars) {
+	  arg_types.push_back(v->getType());
+  }
+
   // TODO: random module name, use twine.
+  std::unique_ptr<Module> M(new Module("funky_mod", getGlobalContext()));
+  auto *ft = FunctionType::get(NF->getReturnType(), arg_types, false);
   auto *CF = Function::Create(
 	  ft, NF->getLinkage(), Twine("osrcont_", NF->getName()), M.get());
   // Set argument names and determine the values of the new arguments
@@ -103,6 +109,7 @@ static void* generator(Function* F, ExecutionEngine* EE,
 		  (cont_arg_it++)->setName(Twine("__osr"));
 	  }
   }
+  assert(cont_arg_t == CF->arg_end());
 
   // Duplicate the body of F2 into the body of JF.
   ValueToValueMapTy NF_to_CF_VMap;
@@ -162,17 +169,10 @@ static void* generator(Function* F, ExecutionEngine* EE,
   }
   
   // Fix operand references
-  BasicBlock *begin = cast<BasicBlock>(NF_to_CF_VMap[&*NF->begin()]);
-  bool found = false;
-  for (Function::iterator BB = CF->begin(), BE = CF->end();
+  auto *BE = &CF->back();
+  for (auto *BB = cast<BasicBlock>(NF_to_CF_VMap[&NF->front()]);
        BB != BE;
-       ++BB) {
-	  // HORRIBLE HACK, I have no idea how to fix it.
-	  if (!found && &*BB == begin) {
-		  found = true;
-	  } else {
-		  continue;
-	  }
+       BB = BB->getNextNode()) {
 	  for (auto II = BB->begin(); II != BB->end(); ++II)
 		  RemapInstruction(&*II, NF_to_CF_VMap, RF_NoModuleLevelChanges);
   }
