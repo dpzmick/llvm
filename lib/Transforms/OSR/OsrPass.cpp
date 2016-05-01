@@ -13,6 +13,7 @@
 #include "llvm/Transforms/Utils/Local.h"
 #include "llvm/Transforms/Utils/SSAUpdater.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/OSR/OsrPass.h"
 #include "llvm/Transforms/OSR/Liveness.hpp"
 #include "llvm/Transforms/OSR/StateMap.hpp"
@@ -63,30 +64,16 @@ static void* generator(Function* F, ExecutionEngine* EE,
   ValueToValueMapTy VMap;
   auto *NF = CloneFunction(F, VMap, false);
   StateMap SM(F, NF, &VMap, true);
-  /*
-  auto *ft = FunctionType::get(F->getReturnType(), arg_types, false);
-  std::unique_ptr<Module> M(new Module("funky_mod", getGlobalContext()));
-  Function* NF = dyn_cast<Function>(M->getOrInsertFunction("new_f", ft));
-  */
-  /*
-  auto it = NF->arg_begin();
-  for (const Value* v : *vars) {
-	  VMap[v] = &*(it++);
-  }
-  SmallVector<ReturnInst*, 16> returns;
-  CloneFunctionInto(NF, F, VMap, true, returns);
-  */
 
-  /*
-  size_t cutoff = F->getArgumentList().size();
-  errs() << "need to skip the first " << cutoff << " elements\n";
-  */
   // Remove the OSR point in the new function.
   auto *osr_point_cont = cast<Instruction>(SM.OneToOne[osr_point]);
-  errs() << "--------\n";
-  errs() << *osr_point_cont;
-  removeOsrPoint(osr_point_cont);
-
+  errs() << "Before removal:\n" << *NF << "\nAFter removal:\n";
+  BasicBlock::iterator II(osr_point_cont);
+  auto *lpad = BranchInst::Create(osr_point_cont->getParent()->getNextNode());
+  ReplaceInstWithInst(osr_point_cont->getParent()->getInstList(), II,
+		      lpad);
+//  removeOsrPoint(osr_point_cont);
+  errs() << *NF << "\n";
   std::vector<Type*> arg_types;
   for (const Value* v : *vars) {
 	  arg_types.push_back(v->getType());
@@ -109,7 +96,7 @@ static void* generator(Function* F, ExecutionEngine* EE,
 		  (cont_arg_it++)->setName(Twine("__osr"));
 	  }
   }
-  assert(cont_arg_t == CF->arg_end());
+  assert(cont_arg_it == CF->arg_end());
 
   // Duplicate the body of F2 into the body of JF.
   ValueToValueMapTy NF_to_CF_VMap;
@@ -124,7 +111,7 @@ static void* generator(Function* F, ExecutionEngine* EE,
 	  }
   }
 
-  auto *lpad = SM.LandingPadMap[osr_point];
+//  auto *lpad = SM.LandingPadMap[osr_point];
   auto *cont_lpad = cast<Instruction>(NF_to_CF_VMap[lpad]);
 
   // Apply attributes
@@ -146,13 +133,15 @@ static void* generator(Function* F, ExecutionEngine* EE,
   LivenessAnalysis live(NF);
   auto live_vars = live.getLiveOutValues(lpad->getParent());
   std::vector<Value*> values_to_set;
-  for (auto v : values_to_set) {
-	  values_to_set.push_back(v);
+  for (auto v : live_vars) {
+	  Value *vc = const_cast<Value*>(v);
+	  values_to_set.push_back(vc);
   }
 
   auto entry_point_pair = SM.genContinuationFunctionEntry(
 	  getGlobalContext(), osr_point, lpad, cont_lpad, values_to_set,
 	  args_to_cont_args);
+
 
   auto *prev_entry = &CF->getEntryBlock();
   auto *new_entry = entry_point_pair.first;
@@ -161,22 +150,30 @@ static void* generator(Function* F, ExecutionEngine* EE,
   // Undef dead arguments.
   for (auto &dst : NF->args()) {
 	  auto it = NF_to_CF_changes->find(&dst);
-	  Value *v = ((it != NF_to_CF_changes->end())
-		      ? cast<Value>(&dst)                               // Live argument
-		      : cast<Value>(UndefValue::get(dst.getType())));   // Dead argument
-	  NF_to_CF_VMap[&dst] = v;
-	  //insert(std::pair<const Argument*, const Value*>(&dst, v));
+	  Value *v = cast<Value>(&dst);
+	  if (it != NF_to_CF_changes->end()) {
+		  NF_to_CF_VMap[&dst] = it->second;
+		  errs() << *v << " is alive\n";
+	  } else {
+		  errs() << *v << " is dead\n";
+		  NF_to_CF_VMap[&dst] = UndefValue::get(dst.getType());
+	  }
+  //insert(std::pair<const Argument*, const Value*>(&dst, v));
   }
   
   // Fix operand references
+  errs() << "Fixing operand references: \n";
   auto *BE = &CF->back();
   for (auto *BB = cast<BasicBlock>(NF_to_CF_VMap[&NF->front()]);
        BB != BE;
        BB = BB->getNextNode()) {
-	  for (auto II = BB->begin(); II != BB->end(); ++II)
+	  for (auto II = BB->begin(); II != BB->end(); ++II) {
+		  errs() << "\t" << *II << "\n";
 		  RemapInstruction(&*II, NF_to_CF_VMap, RF_NoModuleLevelChanges);
+	  }
   }
   new_entry->insertInto(CF, prev_entry);
+  errs() << "CF fixed so far:\n------------------\n" << *CF << "----------------\n";
 
   SmallVector<PHINode*, 8> inserted_phi_nodes;
   correctSSA(CF, cont_lpad, values_to_set, NF_to_CF_VMap, *NF_to_CF_changes,
@@ -340,16 +337,25 @@ Instruction* OsrPass::addOsrConditionCounterGE(Value &counter,
 static void
 removeOsrPoint(Instruction *src)
 {
+	src->eraseFromParent();
+
+	/*
 	auto *splitBB = src->getParent();
-	if (src != &splitBB->getInstList().front())
+	if (src != &splitBB->getInstList().front()) {
+		errs() << "src is not in front\n";
 		return;
+	}
 	auto *predBB = splitBB->getSinglePredecessor();
-	if (predBB == nullptr)
+	if (predBB == nullptr) {
+		errs() << "single pred is null\n";
 		return;
+	}
 	auto *TI = predBB->getTerminator();
 	if (BranchInst* BI = dyn_cast<BranchInst>(TI)) {
-		if (BI->getNumSuccessors() != 2)
+		if (BI->getNumSuccessors() != 2) {
+			errs() << "num successors isn't 2\n";
 			return;
+		}
 		BasicBlock* FireOSRBlock = BI->getSuccessor(0);
 		FireOSRBlock->eraseFromParent();
 		TI->eraseFromParent();
@@ -365,7 +371,7 @@ removeOsrPoint(Instruction *src)
 				return;
 			}
 		}
-	}
+		} */
 }
 
 static void
@@ -410,7 +416,6 @@ correctSSA(Function *cont, Instruction *cont_lpad,
 		return;
 
 	SSAUpdater updater(inserted_PHI_nodes);
-	PHINode *last_inserted = nullptr;
 	if (lpad_is_first_non_phi)
 		split_block = lpad_block->splitBasicBlock(cont_lpad,
 							  "cont_split");
@@ -418,6 +423,10 @@ correctSSA(Function *cont, Instruction *cont_lpad,
 		Value *prev_value = VMap[orig];
 		auto *prev_inst = cast<Instruction>(VMap[orig]);
 		Value *next_value = VMap_updates[orig];
+		if (next_value == nullptr) {
+			errs() << "next value is null:\n\tprev_value = "<<  *orig << "\n";
+			continue;
+		}
 		if (prev_value->hasName()) {
 			updater.Initialize(
 				prev_value->getType(), StringRef(
