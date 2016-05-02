@@ -58,18 +58,21 @@ static void* generator(Function* F, ExecutionEngine* EE,
 
   ValueToValueMapTy VMap;
   auto *NF = CloneFunction(F, VMap, false);
-  removeOsrConditon(NF, osr_point, VMap);
-
+//  removeOsrConditon(NF, osr_point, VMap);
   errs() << *NF << "\n";
-  return nullptr;
 
   auto* osr_point_cont = cast<BranchInst>(VMap[osr_point]);
-  auto* lpad = BranchInst::Create(osr_point_cont->getParent()->getNextNode());
+  BasicBlock::iterator II(osr_point_cont);
+  auto *lpad = BranchInst::Create(osr_point_cont->getSuccessor(1));
+  ReplaceInstWithInst(osr_point_cont->getParent()->getInstList(), II,
+		      lpad);
   StateMap SM(F, NF, &VMap, true);
   std::vector<Type*> arg_types;
   for (const Value* v : *vars) {
 	  arg_types.push_back(v->getType());
   }
+//  osr_point_cont->getSuccessor(0)->dropAllReferences();
+  osr_point_cont->getSuccessor(0)->eraseFromParent();
 
   // TODO: random module name, use twine.
   std::unique_ptr<Module> M(new Module("funky_mod", getGlobalContext()));
@@ -155,10 +158,10 @@ static void* generator(Function* F, ExecutionEngine* EE,
 
   // Fix operand references
   errs() << "Fixing operand references: \n";
-  auto *BE = &CF->back();
-  for (auto *BB = cast<BasicBlock>(NF_to_CF_VMap[&NF->front()]);
+  Function::iterator BE = CF->end();
+  for (Function::iterator BB = CF->begin();
        BB != BE;
-       BB = BB->getNextNode()) {
+       ++BB) {
 	  for (auto II = BB->begin(); II != BB->end(); ++II) {
 		  errs() << "\t" << *II << "\n";
 		  RemapInstruction(&*II, NF_to_CF_VMap, RF_NoModuleLevelChanges);
@@ -207,7 +210,7 @@ bool OsrPass::runOnFunction( Function &F )
   // the vars at the end of this loop's header are the relevant live variables
   // we need to get these before we start adding new things to the function
   LivenessAnalysis live(&F);
-  auto relevantLiveVars = new std::set<const Value*>();
+  auto *relevantLiveVars = new std::set<const Value*>();
   for (auto &Loop : LI) {
     for (auto var : live.getLiveOutValues(Loop->getHeader())) {
       relevantLiveVars->insert(var);
@@ -216,8 +219,7 @@ bool OsrPass::runOnFunction( Function &F )
       }
       errs() << "adding: " << *var << "\n";
     }
-  }
-
+    }
   errs() << "presize: " << relevantLiveVars->size() << "\n";
   errs() << F << "\n\n";
 
@@ -230,8 +232,11 @@ bool OsrPass::runOnFunction( Function &F )
 
   Instruction* cond = nullptr;
   for (auto &Loop : LI) {
-    Value* counter = instrumentLoopWithCounters(*Loop);
-    cond = addOsrConditionCounterGE(*counter, 1000, *Loop->getHeader(), *osrBB);
+	  Value* counter = instrumentLoopWithCounters(*Loop, relevantLiveVars);
+	  cond = addOsrConditionCounterGE(*counter, 1000, *Loop->getHeader(),
+					  *osrBB);
+
+
   }
   errs() << F << "\n\n";
 
@@ -417,7 +422,7 @@ correctSSA(Function *cont, Instruction *cont_lpad,
 	}
 }
 
-Value* OsrPass::instrumentLoopWithCounters( Loop &L )
+Value* OsrPass::instrumentLoopWithCounters( Loop &L, std::set<const Value*> *relevant )
 {
   // TODO try to use getCanonicalInductionVariable
   // maybe just return that if this works
@@ -426,6 +431,7 @@ Value* OsrPass::instrumentLoopWithCounters( Loop &L )
   BasicBlock::iterator it = header->begin();
 
   auto phi = PHINode::Create(Type::getInt64Ty(header->getContext()), 2, "loop_counter", &*it);
+  relevant->insert(cast<Value>(phi));
 
   SmallVector<BasicBlock*, 16> ebs;
   L.getLoopLatches(ebs);
@@ -438,6 +444,7 @@ Value* OsrPass::instrumentLoopWithCounters( Loop &L )
 
     // increment the counter
     auto v = B.CreateAdd(phi, B.getInt64(1), "new_loop_counter");
+//    relevant->insert(cast<Value>(v));
     phi->addIncoming(v, exit_b);
 
     B.Insert(oldTerm);
