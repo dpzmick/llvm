@@ -43,6 +43,7 @@ OsrPass::OsrPass(ExecutionEngine *EE)
   initializeOsrPassPass(*PassRegistry::getPassRegistry());
 }
 
+static void removeOsrConditon(Function*, Instruction*, ValueToValueMapTy&);
 static void correctSSA(Function *cont, Instruction *cont_lpad,
 		       std::vector<Value*> &values_to_set,
 		       ValueToValueMapTy &VMap,
@@ -57,21 +58,12 @@ static void* generator(Function* F, ExecutionEngine* EE,
 
   ValueToValueMapTy VMap;
   auto *NF = CloneFunction(F, VMap, false);
+  removeOsrConditon(NF, osr_point, VMap);
 
-  // note that the pointers are different
-  errs() << "original: " << osr_point << " :: " << *osr_point << "\n";
-  errs() << "vmapped: " << VMap[osr_point] << " :: " << *VMap[osr_point] << "\n";
-
-  // Remove the OSR point in the new function.
-  errs() << "Before removal:\n" << *NF << "\n";
-  auto* osr_point_cont = cast<BranchInst>(VMap[osr_point]);
-  osr_point_cont->setCondition(
-      ConstantInt::get(Type::getInt1Ty(F->getContext()), false));
-  errs() << "After removal:\n" << *NF << "\n";
-
-  verifyFunction(*NF, &errs());
+  errs() << *NF << "\n";
   return nullptr;
 
+  auto* osr_point_cont = cast<BranchInst>(VMap[osr_point]);
   auto* lpad = BranchInst::Create(osr_point_cont->getParent()->getNextNode());
   StateMap SM(F, NF, &VMap, true);
   std::vector<Type*> arg_types;
@@ -331,6 +323,17 @@ Instruction* OsrPass::addOsrConditionCounterGE(Value &counter,
 
   auto osr_cond = Builder.CreateICmpSGE(&counter, Builder.getInt64(limit), "osr.cond");
   return Builder.CreateCondBr(osr_cond, &OsrBB, newBB);
+}
+
+static void
+removeOsrConditon(Function* F, Instruction* osr_point, ValueToValueMapTy& VMap) {
+  // note that the pointers are different
+  // errs() << "original: " << osr_point << " :: " << *osr_point << "\n";
+  // errs() << "vmapped: " << VMap[osr_point] << " :: " << *VMap[osr_point] << "\n";
+
+  auto* osr_point_cont = cast<BranchInst>(VMap[osr_point]);
+  osr_point_cont->setCondition(
+      ConstantInt::get(Type::getInt1Ty(F->getContext()), false));
 }
 
 static void
