@@ -43,13 +43,11 @@ OsrPass::OsrPass(ExecutionEngine *EE)
   initializeOsrPassPass(*PassRegistry::getPassRegistry());
 }
 
-static void removeOsrPoint(Instruction *src);
 static void correctSSA(Function *cont, Instruction *cont_lpad,
 		       std::vector<Value*> &values_to_set,
 		       ValueToValueMapTy &VMap,
 		       ValueToValueMapTy &VMap_updates,
 		       SmallVectorImpl<PHINode*> *inserted_PHI_nodes);
-		       
 
 static void* generator(Function* F, ExecutionEngine* EE,
                        Instruction* osr_point, std::set<const Value*>* vars)
@@ -57,23 +55,25 @@ static void* generator(Function* F, ExecutionEngine* EE,
   errs() << *F;
   errs() << *osr_point << "\n";
 
-  // Clone the previous function into the new one and create a state map between
-  // the two values.
-  // This isn't the function we're going to compile, just a temporary we copy
-  // the function into.
   ValueToValueMapTy VMap;
   auto *NF = CloneFunction(F, VMap, false);
-  StateMap SM(F, NF, &VMap, true);
+
+  // note that the pointers are different
+  errs() << "original: " << osr_point << " :: " << *osr_point << "\n";
+  errs() << "vmapped: " << VMap[osr_point] << " :: " << *VMap[osr_point] << "\n";
 
   // Remove the OSR point in the new function.
-  auto *osr_point_cont = cast<Instruction>(SM.OneToOne[osr_point]);
-  errs() << "Before removal:\n" << *NF << "\nAFter removal:\n";
-  BasicBlock::iterator II(osr_point_cont);
-  auto *lpad = BranchInst::Create(osr_point_cont->getParent()->getNextNode());
-  ReplaceInstWithInst(osr_point_cont->getParent()->getInstList(), II,
-		      lpad);
-//  removeOsrPoint(osr_point_cont);
-  errs() << *NF << "\n";
+  errs() << "Before removal:\n" << *NF << "\n";
+  auto* osr_point_cont = cast<BranchInst>(VMap[osr_point]);
+  osr_point_cont->setCondition(
+      ConstantInt::get(Type::getInt1Ty(F->getContext()), false));
+  errs() << "After removal:\n" << *NF << "\n";
+
+  verifyFunction(*NF, &errs());
+  return nullptr;
+
+  auto* lpad = BranchInst::Create(osr_point_cont->getParent()->getNextNode());
+  StateMap SM(F, NF, &VMap, true);
   std::vector<Type*> arg_types;
   for (const Value* v : *vars) {
 	  arg_types.push_back(v->getType());
@@ -160,7 +160,7 @@ static void* generator(Function* F, ExecutionEngine* EE,
 	  }
   //insert(std::pair<const Argument*, const Value*>(&dst, v));
   }
-  
+
   // Fix operand references
   errs() << "Fixing operand references: \n";
   auto *BE = &CF->back();
@@ -178,7 +178,7 @@ static void* generator(Function* F, ExecutionEngine* EE,
   SmallVector<PHINode*, 8> inserted_phi_nodes;
   correctSSA(CF, cont_lpad, values_to_set, NF_to_CF_VMap, *NF_to_CF_changes,
 	     &inserted_phi_nodes);
-  
+
   errs() << "continuation function:\n\n" << *CF << "\n";
 
   verifyFunction(*CF, &errs());
@@ -313,7 +313,7 @@ bool OsrPass::runOnFunction( Function &F )
 
   errs() << F << "\n\n";
   OsrBuilder.CreateRet(cont_result);
-  
+
   return true;
 }
 
@@ -331,47 +331,6 @@ Instruction* OsrPass::addOsrConditionCounterGE(Value &counter,
 
   auto osr_cond = Builder.CreateICmpSGE(&counter, Builder.getInt64(limit), "osr.cond");
   return Builder.CreateCondBr(osr_cond, &OsrBB, newBB);
-}
-
-// Remove OSR from tinyVM. I think this is pretty much the only way to do this.
-static void
-removeOsrPoint(Instruction *src)
-{
-	src->eraseFromParent();
-
-	/*
-	auto *splitBB = src->getParent();
-	if (src != &splitBB->getInstList().front()) {
-		errs() << "src is not in front\n";
-		return;
-	}
-	auto *predBB = splitBB->getSinglePredecessor();
-	if (predBB == nullptr) {
-		errs() << "single pred is null\n";
-		return;
-	}
-	auto *TI = predBB->getTerminator();
-	if (BranchInst* BI = dyn_cast<BranchInst>(TI)) {
-		if (BI->getNumSuccessors() != 2) {
-			errs() << "num successors isn't 2\n";
-			return;
-		}
-		BasicBlock* FireOSRBlock = BI->getSuccessor(0);
-		FireOSRBlock->eraseFromParent();
-		TI->eraseFromParent();
-		BranchInst* brToSplitBB = BranchInst::Create(splitBB);
-		predBB->getInstList().push_back(brToSplitBB);
-		for (BasicBlock::reverse_iterator revIt = ++(predBB->rbegin()),
-			     revEnd = predBB->rend(); revIt != revEnd; ) {
-			Instruction *I = &*revIt;
-			if (isInstructionTriviallyDead(I, nullptr)) {
-				I->eraseFromParent();
-				revEnd = predBB->rend();
-			} else {
-				return;
-			}
-		}
-		} */
 }
 
 static void
