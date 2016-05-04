@@ -242,9 +242,9 @@ static void* indirect_inline_generator(Function* F,
     mod->getFunctionList().push_back(myFunToInline);
 
     // find the arg to CF which corresponds to the arg to F, if there is one
+    // hows this for a hack?
+    auto hack = Twine(p.first->getName(), "_osr");
     for (auto& a : CF->getArgumentList()) {
-      // hows this for a hack?
-      auto hack = Twine(p.first->getName(), "_osr");
       if (a.getName().str() == hack.str()) {
         // only one instance of every type is ever created, the pointer cmp is
         // valid
