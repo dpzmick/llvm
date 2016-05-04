@@ -30,6 +30,7 @@ required_libraries =
  NativeCodeGen
  SelectionDAG
  TransformUtils
+ ipo
  Osr
  Instrumentation
  Scalar

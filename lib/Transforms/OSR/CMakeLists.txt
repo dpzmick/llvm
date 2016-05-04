@@ -1,3 +1,7 @@
+set(LLVM_LINK_COMPONENTS
+    ipo
+  )
+
 add_llvm_library(LLVMOsr
   OsrPass.cpp
   Liveness.cpp

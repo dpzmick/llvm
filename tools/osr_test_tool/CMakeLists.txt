@@ -4,11 +4,10 @@ set(LLVM_LINK_COMPONENTS
   ExecutionEngine
   IRReader
   Instrumentation
-  Interpreter
   MC
   MCJIT
   Object
-  OrcJIT
+  ipo
   RuntimeDyld
   SelectionDAG
   Support

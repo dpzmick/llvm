@@ -52,14 +52,12 @@ struct StateMap {
 	{
 		auto *updated_values = new llvm::ValueToValueMapTy();
 		auto *entry_point = llvm::BasicBlock::Create(context, "osr_entry");
-		llvm::errs() << "values to set:\n";
 		for (auto *dst : values_to_set) {
 			auto it = OneToOne.find(dst);
 			if (it == OneToOne.end())
 				llvm::report_fatal_error(
 					"[genContinuationFunctionEntry]"
 					" missing mapping information");
-			llvm::errs() << *dst <<"\n";
 			auto *src = it->second;
 			(*updated_values)[dst] = fetched_values[src];
 		}
