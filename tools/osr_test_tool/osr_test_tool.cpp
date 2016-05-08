@@ -107,6 +107,8 @@ int main(int argc, char **argv, char * const *envp) {
   EE->generateCodeForModule(Mod);
   EE->finalizeObject();
 
+  errs() << "module after pass: " << *Mod << "\n";
+
   std::vector<GenericValue> args;
   errs() << "res: " << EE->runFunction(Main, args).IntVal << "\n";
 

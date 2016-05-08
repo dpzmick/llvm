@@ -19,8 +19,6 @@
 #include "llvm/Transforms/OSR/Liveness.hpp"
 #include "llvm/Transforms/OSR/StateMap.hpp"
 
-#include <iostream>
-
 #define DEBUG_TYPE "OsrPass"
 #define LOG_HEADER DEBUG_TYPE << "::" << __func__ << " "
 
@@ -58,7 +56,7 @@ static std::unique_ptr<Module> generator(Function* F,
                                          Function** out_newfn)
 {
   ValueToValueMapTy VMap;
-  auto *NF = CloneFunction(F, VMap, false);
+  auto *NF = CloneFunction(F, VMap, true);
 
   auto* osr_point_cont = cast<BranchInst>(VMap[osr_point]);
   BasicBlock::iterator II(osr_point_cont);
@@ -74,11 +72,14 @@ static std::unique_ptr<Module> generator(Function* F,
   // TODO: random module name, use twine.
   std::unique_ptr<Module> M(new Module("funky_mod", getGlobalContext()));
   for (auto& f: *F->getParent()) {
-    if (!f.isDeclaration()) continue;
-    Function::Create(f.getFunctionType(),
+    auto nf = Function::Create(f.getFunctionType(),
         Function::ExternalLinkage,
         f.getName(),
         M.get());
+
+    // replace all calls in this module with calls to the externs declared
+    // functions
+    f.replaceAllUsesWith(nf);
   }
 
   std::vector<Type*> arg_types;
@@ -173,7 +174,7 @@ static std::unique_ptr<Module> generator(Function* F,
   correctSSA(CF, cont_lpad, values_to_set, NF_to_CF_VMap, *NF_to_CF_changes,
 	     &inserted_phi_nodes);
 
-  verifyFunction(*CF, &errs());
+  //verifyFunction(*CF, &errs());
   *out_newfn = CF;
   return M;
 }
@@ -216,8 +217,9 @@ static void* indirect_inline_generator(Function* F,
   }
 
   if (!fs_to_inline.size()) {
-    errs() << "could not any functions which we want to try inlining\n";
-    return (void*)EE->getFunctionAddress(F->getName());
+     errs() << "could not any functions which we want to try inlining\n";
+     // in this case we go ahead and generate the version with the OSR stuff
+     // removed, else we will keep firing the OSR
   }
 
   for (auto p : fs_to_inline) {
@@ -231,12 +233,14 @@ static void* indirect_inline_generator(Function* F,
   assert(CF);
   assert(mod);
 
+  //errs() << "before inlining\n" << *mod << "\n";
+
   // replace all the function calls with direct function calls
   for (auto p : fs_to_inline) {
     // need to copy the function being inlined into the new module so that we
     // can inline it + add attributes
     ValueToValueMapTy VMap;
-    Function* myFunToInline = CloneFunction(p.second, VMap, false);
+    Function* myFunToInline = CloneFunction(p.second, VMap, true);
     myFunToInline->addFnAttr(Attribute::AlwaysInline);
     myFunToInline->setLinkage(Function::LinkageTypes::PrivateLinkage);
     mod->getFunctionList().push_back(myFunToInline);
@@ -252,16 +256,13 @@ static void* indirect_inline_generator(Function* F,
 
         for (auto use : a.users()) {
           if (auto call = dyn_cast<CallInst>(use)) {
-            errs () << "fp is used in call " << *call << "\n";
+            if (call->getCalledValue() != &a) continue;
             call->setCalledFunction(myFunToInline);
           }
         }
       }
     }
   }
-
-  verifyFunction(*CF, &errs());
-  errs() << "mod before error\n" << *mod << "\n";
 
   auto PM = llvm::make_unique<legacy::PassManager>();
   PM->add(createDeadCodeEliminationPass());
@@ -270,7 +271,8 @@ static void* indirect_inline_generator(Function* F,
   PM->add(createAlwaysInlinerPass());
   PM->run(*mod);
 
-  errs() << *mod << "\n";
+  errs() << "after passman\n" << *mod << "\n";
+  verifyFunction(*CF, &errs());
 
   EE->addModule(std::move(M));
   EE->generateCodeForModule(mod);
@@ -302,146 +304,149 @@ bool OsrPass::runOnModule( Module &M ) {
       }
     }
 
-    flag = flag || runOnFunction(F);
+    flag = runOnFunction(F) || flag;
   }
   return flag;
 }
 
 bool OsrPass::runOnFunction( Function &F )
 {
-  if (F.isDeclaration()) return false;
-
-  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
-
-  // the vars at the end of this loop's header are the relevant live variables
-  // we need to get these before we start adding new things to the function
-  LivenessAnalysis live(&F);
-  auto *relevantLiveVars = new std::set<const Value*>();
-  for (auto &Loop : LI) {
-    for (auto var : live.getLiveOutValues(Loop->getHeader())) {
-      relevantLiveVars->insert(var);
-    }
-  }
-
-  // now that we have the important information from the original function, we
-  // are going to start fiddling around with it
-
-  // TODO will need an osr block for each loop in the function
-  BasicBlock* osrBB = BasicBlock::Create(getGlobalContext(), "osr", &F);
-  IRBuilder<> OsrBuilder(osrBB);
-
-  Instruction* cond = nullptr;
-  for (auto &Loop : LI) {
-	  Value* counter = instrumentLoopWithCounters(*Loop, relevantLiveVars);
-    cond = addOsrConditionCounterGE(*counter, 1000, *Loop->getHeader(),
-        *osrBB);
-  }
-  if (!cond) return false;
-
   // some helpful things
   auto getIntPtr = [&](uintptr_t ptr) {
     return ConstantInt::get(Type::getInt64Ty(F.getContext()), ptr);
   };
   auto voidPtr = Type::getInt8PtrTy(F.getContext());
 
-  // create the osr stub code
-  // danger, here be dragons
-  // first, get the values of every live variable which is a function pointer
-  size_t nfps = 0;
-  for (auto& arg: F.getArgumentList()) {
-    auto ty = arg.getType();
-    if (!ty->isPointerTy())                           continue;
-    if (!ty->getPointerElementType()->isFunctionTy()) continue;
-    nfps++;
+  if (F.isDeclaration()) return false;
+
+  LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
+
+  // get all the live vars before we fiddle with anything
+  LivenessAnalysis live(&F);
+  auto relevantLiveVars = std::map<const Loop*, std::set<const Value*>*>();
+  for (auto Loop : LI) {
+    relevantLiveVars[Loop] = new std::set<const Value*>();
+    for (auto var : live.getLiveOutValues(Loop->getHeader())) {
+      relevantLiveVars[Loop]->insert(var);
+    }
   }
 
-  // the array will contain nfps elements
-  auto atype = ArrayType::get(Type::getInt8PtrTy(F.getContext()), nfps);
-  auto array = OsrBuilder.CreateAlloca(atype, 0);
+  // for every loop, add the osr instrumentation
+  size_t osrcounter = 0;
+  for (auto Loop : LI) {
+    // create an osr block for each loop in the function
+    std::string osrname = "osr" + std::to_string(osrcounter++);
+    BasicBlock* osrBB = BasicBlock::Create(getGlobalContext(), osrname, &F);
+    IRBuilder<> OsrBuilder(osrBB);
 
-  size_t counter = 0;
-  for (auto& arg: F.getArgumentList()) {
-    auto ty = arg.getType();
-    if (!ty->isPointerTy())                           continue;
-    if (!ty->getPointerElementType()->isFunctionTy()) continue;
+    Value* loopcounter = instrumentLoopWithCounters(*Loop, relevantLiveVars[Loop]);
+    Instruction* cond = addOsrConditionCounterGE(*loopcounter,
+        1000,
+        *Loop->getHeader(),
+        *osrBB);
+    if (!cond) continue;
 
-    std::vector<Value*> args;
-    args.push_back(ConstantInt::get(Type::getInt64Ty(F.getContext()), 0));
-    args.push_back(ConstantInt::get(Type::getInt64Ty(F.getContext()), counter++));
-    auto el = OsrBuilder.CreateGEP(array, args);
+    // create the osr stub code
+    // danger, here be dragons
+    // first, get the values of every argument which is a function pointer
+    size_t nfps = 0;
+    for (auto& arg: F.getArgumentList()) {
+      auto ty = arg.getType();
+      if (!ty->isPointerTy())                           continue;
+      if (!ty->getPointerElementType()->isFunctionTy()) continue;
+      nfps++;
+    }
 
-    // pass the address of the function being called
-    auto val = OsrBuilder.CreateBitCast(&arg, Type::getInt8PtrTy(F.getContext()));
+    // the array will contain nfps elements
+    auto atype = ArrayType::get(Type::getInt8PtrTy(F.getContext()), nfps);
+    auto array = OsrBuilder.CreateAlloca(atype, 0);
 
-    OsrBuilder.CreateStore(val, el);
+    size_t counter = 0;
+    for (auto& arg: F.getArgumentList()) {
+      auto ty = arg.getType();
+      if (!ty->isPointerTy())                           continue;
+      if (!ty->getPointerElementType()->isFunctionTy()) continue;
+
+      std::vector<Value*> args;
+      args.push_back(ConstantInt::get(Type::getInt64Ty(F.getContext()), 0));
+      args.push_back(ConstantInt::get(Type::getInt64Ty(F.getContext()), counter++));
+      auto el = OsrBuilder.CreateGEP(array, args);
+
+      // pass the address of the function being called
+      auto val = OsrBuilder.CreateBitCast(&arg, Type::getInt8PtrTy(F.getContext()));
+
+      OsrBuilder.CreateStore(val, el);
+    }
+    assert(counter == nfps);
+
+    // now we need to get an fp to a new function which takes all of our live vars
+    // as args and returns the same thing as the original function.
+    // we return the result of a call to this function
+
+    // types for continuation func
+    std::vector<Type*> cont_args_types;
+    for (auto v : *relevantLiveVars[Loop]) {
+      cont_args_types.push_back(v->getType());
+    }
+
+    std::vector<Value*> cont_args_values;
+    for (auto v : *relevantLiveVars[Loop]) {
+      cont_args_values.push_back(const_cast<Value*>(v));
+    }
+
+    auto cont_ret      = Type::getInt32Ty(F.getContext());
+    auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
+    auto cont_ptr_type = PointerType::getUnqual(cont_type);
+
+    std::vector<Type*> stub_args_types;
+    stub_args_types.push_back(voidPtr);
+    stub_args_types.push_back(voidPtr);
+    stub_args_types.push_back(voidPtr);
+    stub_args_types.push_back(voidPtr);
+    // this is a bit abusive. Then again, all of this code is that way
+    stub_args_types.push_back(array->getType());
+
+    std::vector<Value*> stub_args_values;
+    stub_args_values.push_back(
+        OsrBuilder.CreateIntToPtr(
+          getIntPtr((uintptr_t)&F),
+          stub_args_types[0]));
+
+    stub_args_values.push_back(
+        OsrBuilder.CreateIntToPtr(
+          getIntPtr((uintptr_t)EE),
+          stub_args_types[1]
+          ));
+
+    stub_args_values.push_back(
+        OsrBuilder.CreateIntToPtr(
+          getIntPtr((uintptr_t)cond),
+          stub_args_types[2]
+          ));
+
+    stub_args_values.push_back(
+        OsrBuilder.CreateIntToPtr(
+          getIntPtr((uintptr_t)relevantLiveVars[Loop]),
+          stub_args_types[3]
+          ));
+
+    stub_args_values.push_back(array);
+
+    auto stub_ret      = Type::getInt8PtrTy(F.getContext());
+    auto stub_type     = FunctionType::get(stub_ret, stub_args_types, false);
+    auto stub_ptr_type = PointerType::getUnqual(stub_type);
+
+    auto stub_int_val = getIntPtr((uintptr_t)indirect_inline_generator);
+    auto stub_ptr    = OsrBuilder.CreateIntToPtr(stub_int_val, stub_ptr_type);
+    auto stub_result = OsrBuilder.CreateCall(stub_ptr, stub_args_values);
+
+    auto cont_ptr = OsrBuilder.CreatePointerCast(stub_result, cont_ptr_type);
+    auto cont_result = OsrBuilder.CreateCall(cont_ptr, cont_args_values);
+    cont_result->setTailCall(true);
+
+    OsrBuilder.CreateRet(cont_result);
   }
-  assert(counter == nfps);
 
-  // now we need to get an fp to a new function which takes all of our live vars
-  // as args and returns the same thing as the original function.
-  // we return the result of a call to this function
-
-  // types for continuation func
-  std::vector<Type*> cont_args_types;
-  for (auto v : *relevantLiveVars) {
-    cont_args_types.push_back(v->getType());
-  }
-
-  std::vector<Value*> cont_args_values;
-  for (auto v : *relevantLiveVars) {
-    cont_args_values.push_back(const_cast<Value*>(v));
-  }
-
-  auto cont_ret      = Type::getInt32Ty(F.getContext());
-  auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
-  auto cont_ptr_type = PointerType::getUnqual(cont_type);
-
-  std::vector<Type*> stub_args_types;
-  stub_args_types.push_back(voidPtr);
-  stub_args_types.push_back(voidPtr);
-  stub_args_types.push_back(voidPtr);
-  stub_args_types.push_back(voidPtr);
-  // this is a bit abusive. Then again, all of this code is that way
-  stub_args_types.push_back(array->getType());
-
-  std::vector<Value*> stub_args_values;
-  stub_args_values.push_back(
-      OsrBuilder.CreateIntToPtr(
-        getIntPtr((uintptr_t)&F),
-        stub_args_types[0]));
-
-  stub_args_values.push_back(
-      OsrBuilder.CreateIntToPtr(
-        getIntPtr((uintptr_t)EE),
-        stub_args_types[1]
-        ));
-
-  stub_args_values.push_back(
-      OsrBuilder.CreateIntToPtr(
-        getIntPtr((uintptr_t)cond),
-        stub_args_types[2]
-        ));
-
-  stub_args_values.push_back(
-      OsrBuilder.CreateIntToPtr(
-        getIntPtr((uintptr_t)relevantLiveVars),
-        stub_args_types[3]
-        ));
-
-  stub_args_values.push_back(array);
-
-  auto stub_ret      = Type::getInt8PtrTy(F.getContext());
-  auto stub_type     = FunctionType::get(stub_ret, stub_args_types, false);
-  auto stub_ptr_type = PointerType::getUnqual(stub_type);
-
-  auto stub_int_val = getIntPtr((uintptr_t)indirect_inline_generator);
-  auto stub_ptr    = OsrBuilder.CreateIntToPtr(stub_int_val, stub_ptr_type);
-  auto stub_result = OsrBuilder.CreateCall(stub_ptr, stub_args_values);
-
-  auto cont_ptr = OsrBuilder.CreatePointerCast(stub_result, cont_ptr_type);
-  auto cont_result = OsrBuilder.CreateCall(cont_ptr, cont_args_values);
-
-  OsrBuilder.CreateRet(cont_result);
   return true;
 }
 

@@ -30,6 +30,7 @@ namespace llvm {
     bool runOnModule(Module&) override;
 
     inline void getAnalysisUsage(AnalysisUsage &AU) const override {
+      AU.addRequired<DominatorTreeWrapperPass>();
       AU.addRequired<LoopInfoWrapperPass>();
       ModulePass::getAnalysisUsage(AU);
     }
