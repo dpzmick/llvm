@@ -5,6 +5,7 @@ set(LLVM_LINK_COMPONENTS
 add_llvm_library(LLVMOsr
   OsrPass.cpp
   Liveness.cpp
+  MCJITWrapper.cpp
 
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/OSR

@@ -28,19 +28,19 @@ static std::map<std::string, std::set<Function*>> possible_functions;
 
 char OsrPass::ID = 0;
 
-ModulePass* llvm::createOsrPassPass(ExecutionEngine* EE) {
-  return new OsrPass(EE);
+ModulePass* llvm::createOsrPassPass(MCJITWrapper* MC) {
+  return new OsrPass(MC);
 }
 
 INITIALIZE_PASS_BEGIN(OsrPass, "osr", "osr", false, false)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_END(OsrPass, "osr", "osr", false, false)
 
-OsrPass::OsrPass(ExecutionEngine *EE)
+OsrPass::OsrPass(MCJITWrapper *MC)
 : ModulePass(ID),
-  EE(EE)
+  MC(MC)
 {
-  assert(EE);
+  assert(MC);
   initializeOsrPassPass(*PassRegistry::getPassRegistry());
 }
 
@@ -55,6 +55,7 @@ static std::unique_ptr<Module> generator(Function* F,
                                          std::set<const Value*>* vars,
                                          Function** out_newfn)
 {
+  errs() << "in generator\n";
   ValueToValueMapTy VMap;
   auto *NF = CloneFunction(F, VMap, true);
 
@@ -174,7 +175,6 @@ static std::unique_ptr<Module> generator(Function* F,
   correctSSA(CF, cont_lpad, values_to_set, NF_to_CF_VMap, *NF_to_CF_changes,
 	     &inserted_phi_nodes);
 
-  //verifyFunction(*CF, &errs());
   *out_newfn = CF;
   return M;
 }
@@ -183,13 +183,14 @@ static std::unique_ptr<Module> generator(Function* F,
 // if any of them are being used in a call via a function pointer, replaces
 // all of the calls with the function
 static void* indirect_inline_generator(Function* F,
-                                       ExecutionEngine* EE,
+                                       MCJITWrapper* MC,
                                        Instruction* osr_point,
                                        std::set<const Value*>* vars,
                                        // pointer to array of pointers of
                                        // function pointer argument values
                                        void** fp_arg_values)
 {
+  errs() << "doing the osr thing\n";
   std::vector<Value*> function_calls;
 
   // first, figure out what it is we want to fiddle around with
@@ -203,7 +204,7 @@ static void* indirect_inline_generator(Function* F,
 
     // find the function that this call actually called
     for (auto* func : possible_functions[F->getName()]) {
-      void* addr = (void*)EE->getFunctionAddress(func->getName());
+      void* addr = (void*)MC->getPointerToFunction(func);
       if (!addr) {
         errs() << "could not find the address for one of the possible functions\n";
       }
@@ -232,8 +233,6 @@ static void* indirect_inline_generator(Function* F,
   auto *mod = M.get();
   assert(CF);
   assert(mod);
-
-  //errs() << "before inlining\n" << *mod << "\n";
 
   // replace all the function calls with direct function calls
   for (auto p : fs_to_inline) {
@@ -271,15 +270,12 @@ static void* indirect_inline_generator(Function* F,
   PM->add(createAlwaysInlinerPass());
   PM->run(*mod);
 
-  errs() << "after passman\n" << *mod << "\n";
   verifyFunction(*CF, &errs());
 
-  EE->addModule(std::move(M));
-  EE->generateCodeForModule(mod);
-  EE->finalizeObject();
+  MC->addModule(std::move(M));
 
   // I can't believe it actually works
-  return (void*)EE->getPointerToFunction(CF);
+  return (void*)MC->getPointerToFunction(CF);
 }
 
 // need this to be a function pass so I can add the osr block to the module.
@@ -414,7 +410,7 @@ bool OsrPass::runOnFunction( Function &F )
 
     stub_args_values.push_back(
         OsrBuilder.CreateIntToPtr(
-          getIntPtr((uintptr_t)EE),
+          getIntPtr((uintptr_t)MC),
           stub_args_types[1]
           ));
 

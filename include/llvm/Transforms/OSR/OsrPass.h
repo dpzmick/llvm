@@ -7,6 +7,7 @@
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/IR/Dominators.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
+#include "llvm/Transforms/OSR/MCJITWrapper.h"
 
 #include <memory>
 
@@ -25,7 +26,7 @@ namespace llvm {
   class OsrPass : public ModulePass {
   public:
     static char ID; // Pass identification
-    explicit OsrPass(ExecutionEngine *EE = nullptr);
+    explicit OsrPass(MCJITWrapper *MC = nullptr);
 
     bool runOnModule(Module&) override;
 
@@ -36,7 +37,7 @@ namespace llvm {
     }
 
   private:
-    ExecutionEngine* EE;
+    MCJITWrapper* MC;
 
     // adds a loop counter to a loop
     // this should become it's own loop pass or something (doesn't seem to already
@@ -52,7 +53,7 @@ namespace llvm {
 
   };
 
-  ModulePass* createOsrPassPass(ExecutionEngine* EE);
+  ModulePass* createOsrPassPass(MCJITWrapper* MC);
   void initializeOsrPassPass(PassRegistry&);
 }
 

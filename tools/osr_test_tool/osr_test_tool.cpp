@@ -16,6 +16,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "llvm/Transforms/OSR/OsrPass.h"
+#include "llvm/Transforms/OSR/MCJITWrapper.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Analysis/Passes.h"
 #include "llvm/IR/IRBuilder.h"
@@ -94,20 +95,21 @@ int main(int argc, char **argv, char * const *envp) {
   // the hackery that makes the osr possible
   Owner->setDataLayout(EE->getDataLayout());
 
+  // make a fun wrapper thing
+  MCJITWrapper* wrapper = new MCJITWrapper(EE);
+
   // make a pass manager
   auto PM = llvm::make_unique<legacy::PassManager>();
   PM->add(createPromoteMemoryToRegisterPass());
   PM->add(createInstructionCombiningPass());
   PM->add(createCFGSimplificationPass());
-  PM->add(createOsrPassPass(EE));
+  PM->add(createOsrPassPass(wrapper));
   //PM->add(createDeadCodeEliminationPass());
   PM->run(*Mod);
 
-  EE->addModule(std::move(Owner));
-  EE->generateCodeForModule(Mod);
-  EE->finalizeObject();
+  wrapper->addModule(std::move(Owner));
 
-  errs() << "module after pass: " << *Mod << "\n";
+  errs() << *Mod << "\n";
 
   std::vector<GenericValue> args;
   errs() << "res: " << EE->runFunction(Main, args).IntVal << "\n";

@@ -23,8 +23,8 @@ int main() {
   printf("running isord test\n");
 
   assert(isord(arr, 100, comp1) == 1);
-  assert(isord(arr, 1001,comp1) == 1);
-  assert(isord(arr, 1001,comp2) == 1);
+  assert(isord(arr, 10000,comp1) == 1);
+  assert(isord(arr, 10000,comp2) == 1);
   printf("passed\n");
 }
 
