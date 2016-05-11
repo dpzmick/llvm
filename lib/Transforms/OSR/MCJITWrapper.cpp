@@ -12,6 +12,8 @@ void MCJITWrapper::addModule(std::unique_ptr<Module> M) {
   // force the compile so that we actually have pointers
 
   for (auto& F : *borrow) {
+    if (F.isDeclaration()) continue;
+
     auto addr = (void*)EE->getFunctionAddress(F.getName());
     mapping[addr] = &F;
   }
@@ -20,7 +22,11 @@ void MCJITWrapper::addModule(std::unique_ptr<Module> M) {
 }
 
 Function* MCJITWrapper::getFunctionForPtr(void* ptr) {
-  return mapping[ptr];
+  auto el = mapping.find(ptr);
+  if (el == mapping.end())
+    return nullptr;
+
+  return el->second;
 }
 
 void MCJITWrapper::rebuildMapping() {

@@ -24,8 +24,6 @@
 
 using namespace llvm;
 
-static std::map<std::string, std::set<Function*>> possible_functions;
-
 char OsrPass::ID = 0;
 
 ModulePass* llvm::createOsrPassPass(MCJITWrapper* MC) {
@@ -203,17 +201,12 @@ static void* indirect_inline_generator(Function* F,
     if (!ty->getPointerElementType()->isFunctionTy()) continue;
 
     // find the function that this call actually called
-    for (auto* func : possible_functions[F->getName()]) {
-      void* addr = (void*)MC->getPointerToFunction(func);
-      if (!addr) {
-        errs() << "could not find the address for one of the possible functions\n";
-      }
-
-      if (addr == fp_arg_values[counter]) {
-        fs_to_inline.push_back(std::make_pair(const_cast<Argument*>(&arg), func));
-      }
+    auto* func = MC->getFunctionForPtr(fp_arg_values[counter]);
+    if (!func) {
+      errs() << "could not find a function to inline\n";
+    } else {
+      fs_to_inline.push_back(std::make_pair(const_cast<Argument*>(&arg), func));
     }
-
     counter++;
   }
 
@@ -283,23 +276,7 @@ static void* indirect_inline_generator(Function* F,
 // so this becomes infinite loop
 bool OsrPass::runOnModule( Module &M ) {
   bool flag = false;
-  // find every call to the function and store what function is used as an
-  // argument
-  // this means that the inliner can only operate if the function call is made
-  // where the argument is inlineable exists in the same module as the function
-  // definition
   for (auto &F : M) {
-    for (const auto* u : F.users()) {
-      if (const auto* call = dyn_cast<CallInst>(u)) {
-        for (const auto& arg : call->arg_operands()) {
-          if (isa<Function>(*arg)) {
-            Function* func = dyn_cast<Function>(arg);
-            possible_functions[F.getName()].insert(func);
-          }
-        }
-      }
-    }
-
     flag = runOnFunction(F) || flag;
   }
   return flag;
