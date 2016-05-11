@@ -17,8 +17,6 @@ void MCJITWrapper::addModule(std::unique_ptr<Module> M) {
     auto addr = (void*)EE->getFunctionAddress(F.getName());
     mapping[addr] = &F;
   }
-
-  modules.push_back(borrow);
 }
 
 Function* MCJITWrapper::getFunctionForPtr(void* ptr) {
@@ -27,15 +25,4 @@ Function* MCJITWrapper::getFunctionForPtr(void* ptr) {
     return nullptr;
 
   return el->second;
-}
-
-void MCJITWrapper::rebuildMapping() {
-  mapping.clear();
-
-  for (auto* m : modules) {
-    for (auto& F : *m) {
-      auto addr = (void*)EE->getFunctionAddress(F.getName());
-      mapping[addr] = &F;
-    }
-  }
 }

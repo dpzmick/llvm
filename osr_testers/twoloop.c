@@ -2,11 +2,39 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+#define ITERS 500
+
 typedef int (*ft)(size_t);
 
-int f1(size_t a) { return a; }
-int f2(size_t a) { return a + 1; }
-int f3(size_t a) { return -12; }
+int f1(size_t a) {
+  int f = 0;
+
+  for (size_t i = 0; i < ITERS; i++) {
+    f += a;
+  }
+
+  return f;
+}
+
+int f2(size_t a) {
+  int f = 0;
+
+  for (size_t i = 0; i < ITERS; i++) {
+    f += a - 1;
+  }
+
+  return f;
+}
+
+int f3(size_t a) {
+  int f = 0;
+
+  for (size_t i = 0; i < ITERS; i++) {
+    f += -12;
+  }
+
+  return f;
+}
 
 int loopy(ft f, size_t n) {
   size_t i = 0;
@@ -27,8 +55,9 @@ int loopy(ft f, size_t n) {
 }
 
 int main() {
-  assert(2*1001 == loopy(f1, 1001));
-  assert(2*1001 == loopy(f2, 1001));
-  assert(2*1001 == loopy(f3, 1001));
+  int n = 1000000;
+  assert(2*n == loopy(f1, n));
+  assert(2*n == loopy(f2, n));
+  assert(2*n == loopy(f3, n));
   return 0;
 }

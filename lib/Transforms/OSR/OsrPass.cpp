@@ -8,6 +8,7 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/Transforms/IPO.h"
+#include "llvm/Transforms/IPO/PassManagerBuilder.h"
 #include "llvm/Transforms/Scalar.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/ExecutionEngine/MCJIT.h"
@@ -42,6 +43,8 @@ OsrPass::OsrPass(MCJITWrapper *MC)
   initializeOsrPassPass(*PassRegistry::getPassRegistry());
 }
 
+static size_t mod_count = 0;
+
 static void correctSSA(Function *cont, Instruction *cont_lpad,
 		       std::vector<Value*> &values_to_set,
 		       ValueToValueMapTy &VMap,
@@ -53,7 +56,7 @@ static std::unique_ptr<Module> generator(Function* F,
                                          std::set<const Value*>* vars,
                                          Function** out_newfn)
 {
-  errs() << "in generator\n";
+
   ValueToValueMapTy VMap;
   auto *NF = CloneFunction(F, VMap, true);
 
@@ -68,17 +71,17 @@ static std::unique_ptr<Module> generator(Function* F,
 
   StateMap SM(F, NF, &VMap, true);
 
-  // TODO: random module name, use twine.
-  std::unique_ptr<Module> M(new Module("funky_mod", getGlobalContext()));
+  std::unique_ptr<Module> M(new Module("funky_mod" + std::to_string(mod_count++),
+        getGlobalContext()));
+
   for (auto& f: *F->getParent()) {
-    auto nf = Function::Create(f.getFunctionType(),
+    Function::Create(f.getFunctionType(),
         Function::ExternalLinkage,
         f.getName(),
         M.get());
 
-    // replace all calls in this module with calls to the externs declared
-    // functions
-    f.replaceAllUsesWith(nf);
+    // doing a replacement here doesn't seem to work. I'm doing another
+    // (very slow) replacement at the bottom of this function
   }
 
   std::vector<Type*> arg_types;
@@ -173,6 +176,21 @@ static std::unique_ptr<Module> generator(Function* F,
   correctSSA(CF, cont_lpad, values_to_set, NF_to_CF_VMap, *NF_to_CF_changes,
 	     &inserted_phi_nodes);
 
+  // wowee this is slow but the other thing wasn't working
+  for (auto& f : *CF->getParent()) {
+    for (auto& bb : f) {
+      for (auto& i : bb) {
+        if (auto call = dyn_cast<CallInst>(&i)) {
+          auto* orig = call->getCalledFunction();
+          if (!orig) continue;
+
+          auto* func = CF->getParent()->getFunction(orig->getName());
+          call->setCalledFunction(func);
+        }
+      }
+    }
+  }
+
   *out_newfn = CF;
   return M;
 }
@@ -188,9 +206,6 @@ static void* indirect_inline_generator(Function* F,
                                        // function pointer argument values
                                        void** fp_arg_values)
 {
-  errs() << "doing the osr thing\n";
-  std::vector<Value*> function_calls;
-
   // first, figure out what it is we want to fiddle around with
   // each arg has a corresponding element in the fp_args_values array
   std::vector<std::pair<Value*,Function*>> fs_to_inline;
@@ -200,26 +215,21 @@ static void* indirect_inline_generator(Function* F,
     if (!ty->isPointerTy())                           continue;
     if (!ty->getPointerElementType()->isFunctionTy()) continue;
 
-    // find the function that this call actually called
     auto* func = MC->getFunctionForPtr(fp_arg_values[counter]);
     if (!func) {
-      errs() << "could not find a function to inline\n";
+      DEBUG(errs() << "could not find a function to inline\n");
     } else {
       fs_to_inline.push_back(std::make_pair(const_cast<Argument*>(&arg), func));
     }
     counter++;
   }
 
-  if (!fs_to_inline.size()) {
-     errs() << "could not any functions which we want to try inlining\n";
-     // in this case we go ahead and generate the version with the OSR stuff
-     // removed, else we will keep firing the OSR
-  }
-
+#ifndef NDEBUG
   for (auto p : fs_to_inline) {
     errs() << "trying to inline the calls to " << p.second->getName()
            << " which are bound to the value " << p.first->getName() << "\n";
   }
+#endif
 
   Function* CF = nullptr;
   auto M = generator(F, osr_point, vars, &CF);
@@ -257,13 +267,25 @@ static void* indirect_inline_generator(Function* F,
   }
 
   auto PM = llvm::make_unique<legacy::PassManager>();
-  PM->add(createDeadCodeEliminationPass());
-  PM->add(createCFGSimplificationPass());
-  // actually do the inlining here
   PM->add(createAlwaysInlinerPass());
-  PM->run(*mod);
 
-  verifyFunction(*CF, &errs());
+  PassManagerBuilder pmb;
+  pmb.OptLevel = 3;
+  pmb.populateModulePassManager(*PM.get());
+
+  // we gotta be fast, use a small number of passes
+  // but, we also need to make sure that the new thing is fast enough to be
+  // worth the time spent in the generator
+  /* PM->add(createInstructionCombiningPass()); */
+  /* PM->add(createAggressiveDCEPass()); */
+  /* PM->add(createCFGSimplificationPass()); */
+  /* PM->add(createLoopSimplifyPass()); */
+  /* PM->add(createLoopDeletionPass()); */
+  /* PM->add(createLoopIdiomPass()); */
+  /* PM->add(createCFGSimplificationPass()); */
+
+  PM->run(*mod);
+  errs() << "post pm: " << *mod << "\n";
 
   MC->addModule(std::move(M));
 
@@ -277,20 +299,30 @@ static void* indirect_inline_generator(Function* F,
 bool OsrPass::runOnModule( Module &M ) {
   bool flag = false;
   for (auto &F : M) {
-    flag = runOnFunction(F) || flag;
+    size_t counter = 0;
+    for (auto& arg: F.getArgumentList()) {
+      auto ty = arg.getType();
+      if (!ty->isPointerTy())                           continue;
+      if (!ty->getPointerElementType()->isFunctionTy()) continue;
+
+      counter++;
+    }
+
+    if (counter > 0)
+      flag = runOnFunction(F) || flag;
   }
   return flag;
 }
 
 bool OsrPass::runOnFunction( Function &F )
 {
+  if (F.isDeclaration()) return false;
+
   // some helpful things
   auto getIntPtr = [&](uintptr_t ptr) {
     return ConstantInt::get(Type::getInt64Ty(F.getContext()), ptr);
   };
   auto voidPtr = Type::getInt8PtrTy(F.getContext());
-
-  if (F.isDeclaration()) return false;
 
   LoopInfo &LI = getAnalysis<LoopInfoWrapperPass>(F).getLoopInfo();
 
@@ -367,7 +399,7 @@ bool OsrPass::runOnFunction( Function &F )
       cont_args_values.push_back(const_cast<Value*>(v));
     }
 
-    auto cont_ret      = Type::getInt32Ty(F.getContext());
+    auto cont_ret      = F.getReturnType();
     auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
     auto cont_ptr_type = PointerType::getUnqual(cont_type);
 

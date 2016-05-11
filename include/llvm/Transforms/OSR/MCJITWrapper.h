@@ -15,7 +15,6 @@ class MCJITWrapper {
   public:
     inline MCJITWrapper(ExecutionEngine* jit) : EE(jit) { }
     void addModule(std::unique_ptr<Module>);
-    void rebuildMapping();
     Function* getFunctionForPtr(void*);
     inline void* getPointerToFunction(Function* f) {
       return EE->getPointerToFunction(f);
@@ -24,7 +23,6 @@ class MCJITWrapper {
   private:
     ExecutionEngine* EE;
     std::map<void*, Function*> mapping;
-    std::vector<Module*> modules;
 };
 }
 

@@ -46,34 +46,23 @@
 #include "llvm/Support/raw_ostream.h"
 #include <cerrno>
 #include <assert.h>
+#include <ctime>
 
 using namespace llvm;
 
 #define DEBUG_TYPE "osr_test_tool"
 
-int main(int argc, char **argv, char * const *envp) {
-  sys::PrintStackTraceOnErrorSignal();
-  PrettyStackTraceProgram X(argc, argv);
-
-  assert(1 && "what");
-
+void do_without_osr(char** argv) {
   LLVMContext &Context = getGlobalContext();
-
-  // If we have a native target, initialize it to ensure it is linked in and
-  // usable by the JIT.
-  InitializeNativeTarget();
-  InitializeNativeTargetAsmPrinter();
-  InitializeNativeTargetAsmParser();
-
-  // Load the bitcode...
   SMDiagnostic Err;
+
   std::unique_ptr<Module> Owner = parseIRFile(argv[1], Err, Context);
+
   Module *Mod = Owner.get();
   if (!Mod) {
     Err.print(argv[0], errs());
-    return 1;
+    exit(1);
   }
-
 
   if (std::error_code EC = Mod->materializeAll()) {
     errs() << argv[0] << ": bitcode didn't read correctly.\n";
@@ -84,7 +73,7 @@ int main(int argc, char **argv, char * const *envp) {
   auto Main = Mod->getFunction("main");
   if (!Main) {
     Err.print(argv[0], errs());
-    return 1;
+    exit(1);
   }
 
   // Now we create the JIT.
@@ -95,24 +84,87 @@ int main(int argc, char **argv, char * const *envp) {
   // the hackery that makes the osr possible
   Owner->setDataLayout(EE->getDataLayout());
 
-  // make a fun wrapper thing
-  MCJITWrapper* wrapper = new MCJITWrapper(EE);
+  // make a pass manager
+  auto PM = llvm::make_unique<legacy::PassManager>();
+  PM->add(createPromoteMemoryToRegisterPass());
+  PM->add(createInstructionCombiningPass());
+  PM->add(createCFGSimplificationPass());
+  PM->run(*Mod);
+
+  EE->addModule(std::move(Owner));
+  EE->generateCodeForModule(Mod);
+  EE->finalizeObject();
+
+  std::vector<GenericValue> args;
+  auto fp = (int (*)(void))EE->getPointerToFunction(Main);
+  std::clock_t start = std::clock();
+  fp();
+  errs() << "without osr time: " << std::clock() - start << "\n";
+}
+
+void do_with_osr(char** argv) {
+  LLVMContext &Context = getGlobalContext();
+  SMDiagnostic Err;
+
+  std::unique_ptr<Module> Owner = parseIRFile(argv[1], Err, Context);
+
+  Module *Mod = Owner.get();
+  if (!Mod) {
+    Err.print(argv[0], errs());
+    exit(1);
+  }
+
+  if (std::error_code EC = Mod->materializeAll()) {
+    errs() << argv[0] << ": bitcode didn't read correctly.\n";
+    errs() << "Reason: " << EC.message() << "\n";
+    exit(1);
+  }
+
+  auto Main = Mod->getFunction("main");
+  if (!Main) {
+    Err.print(argv[0], errs());
+    exit(1);
+  }
+
+  // Now we create the JIT.
+  auto InitialModule = llvm::make_unique<Module>("empty", Context);
+  ExecutionEngine* EE = EngineBuilder(std::move(InitialModule)).create();
+  EE->getTargetMachine()->setOptLevel(CodeGenOpt::None); // !important
+  // if we let the target machine optimize, it might modify the module and break
+  // the hackery that makes the osr possible
+  Owner->setDataLayout(EE->getDataLayout());
+
+  MCJITWrapper wrapper(EE);
 
   // make a pass manager
   auto PM = llvm::make_unique<legacy::PassManager>();
   PM->add(createPromoteMemoryToRegisterPass());
   PM->add(createInstructionCombiningPass());
   PM->add(createCFGSimplificationPass());
-  PM->add(createOsrPassPass(wrapper));
-  //PM->add(createDeadCodeEliminationPass());
+  PM->add(createOsrPassPass(&wrapper));
   PM->run(*Mod);
 
-  wrapper->addModule(std::move(Owner));
-
-  errs() << *Mod << "\n";
+  wrapper.addModule(std::move(Owner));
 
   std::vector<GenericValue> args;
-  errs() << "res: " << EE->runFunction(Main, args).IntVal << "\n";
+  auto fp = (int (*)(void))EE->getPointerToFunction(Main);
+  std::clock_t start = std::clock();
+  fp();
+  errs() << "osr time: " << std::clock() - start << "\n";
+}
+
+int main(int argc, char **argv, char * const *envp) {
+  sys::PrintStackTraceOnErrorSignal();
+  PrettyStackTraceProgram X(argc, argv);
+
+  // If we have a native target, initialize it to ensure it is linked in and
+  // usable by the JIT.
+  InitializeNativeTarget();
+  InitializeNativeTargetAsmPrinter();
+  InitializeNativeTargetAsmParser();
+
+  do_without_osr(argv);
+  do_with_osr(argv);
 
   return 0;
 }

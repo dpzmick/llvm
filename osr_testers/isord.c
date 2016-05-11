@@ -18,13 +18,14 @@ int comp2(void *a, void *b) {
 }
 
 int main() {
-  long arr[5000];
+  size_t max = 1000000;
+  long arr[max];
   void* a = malloc(1); free(a);
   printf("running isord test\n");
 
   assert(isord(arr, 100, comp1) == 1);
-  assert(isord(arr, 10000,comp1) == 1);
-  assert(isord(arr, 10000,comp2) == 1);
+  assert(isord(arr, max, comp1) == 1);
+  assert(isord(arr, max, comp2) == 1);
   printf("passed\n");
 }
 
