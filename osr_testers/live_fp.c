@@ -1,11 +1,39 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-typedef int (*ft)(int);
+#define ITERS 500
 
-int f1(int a) { /* printf("called %s\n", __func__); */ return a; }
-int f2(int a) { /* printf("called %s\n", __func__); */ return a + 1; }
-int f3(int a) { /* printf("called %s\n", __func__); */ return -12; }
+typedef int (*ft)(size_t);
+
+int f1(size_t a) {
+  int f = 0;
+
+  for (size_t i = 0; i < ITERS; i++) {
+    f += a;
+  }
+
+  return f;
+}
+
+int f2(size_t a) {
+  int f = 0;
+
+  for (size_t i = 0; i < ITERS; i++) {
+    f += a - 1;
+  }
+
+  return f;
+}
+
+int f3(size_t a) {
+  int f = 0;
+
+  for (size_t i = 0; i < ITERS; i++) {
+    f += -12;
+  }
+
+  return f;
+}
 
 int func(int flag) {
   ft f = NULL;
@@ -17,7 +45,7 @@ int func(int flag) {
   }
 
   int sum = 0;
-  for (int i = 0; i < 1200; i++) {
+  for (int i = 0; i < 1000000; i++) {
     sum += f(i);
   }
 

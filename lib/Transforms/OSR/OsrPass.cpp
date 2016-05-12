@@ -191,6 +191,18 @@ static std::unique_ptr<Module> generator(Function* F,
     }
   }
 
+  // do a small amount of passes here to remove any code which is not used
+  // and make sure that all uses of the arguments are readily exposed
+  auto PM = llvm::make_unique<legacy::PassManager>();
+  PM->add(createInstructionCombiningPass());
+  PM->add(createAggressiveDCEPass());
+  PM->add(createCFGSimplificationPass());
+  PM->add(createLoopSimplifyPass());
+  PM->add(createLoopDeletionPass());
+  PM->add(createLoopIdiomPass());
+  PM->add(createCFGSimplificationPass());
+  PM->run(*M);
+
   *out_newfn = CF;
   return M;
 }
@@ -210,8 +222,8 @@ static void* indirect_inline_generator(Function* F,
   // each arg has a corresponding element in the fp_args_values array
   std::vector<std::pair<Value*,Function*>> fs_to_inline;
   size_t counter = 0;
-  for (const auto& arg : F->getArgumentList()) {
-    auto ty = arg.getType();
+  for (const auto& val : *vars) {
+    const auto& ty = val->getType();
     if (!ty->isPointerTy())                           continue;
     if (!ty->getPointerElementType()->isFunctionTy()) continue;
 
@@ -219,7 +231,7 @@ static void* indirect_inline_generator(Function* F,
     if (!func) {
       DEBUG(errs() << "could not find a function to inline\n");
     } else {
-      fs_to_inline.push_back(std::make_pair(const_cast<Argument*>(&arg), func));
+      fs_to_inline.push_back(std::make_pair(const_cast<Value*>(val), func));
     }
     counter++;
   }
@@ -238,7 +250,7 @@ static void* indirect_inline_generator(Function* F,
   assert(mod);
 
   // replace all the function calls with direct function calls
-  for (auto p : fs_to_inline) {
+  for (auto& p : fs_to_inline) {
     // need to copy the function being inlined into the new module so that we
     // can inline it + add attributes
     ValueToValueMapTy VMap;
@@ -256,8 +268,8 @@ static void* indirect_inline_generator(Function* F,
         // valid
         assert(a.getType() == p.first->getType());
 
-        for (auto use : a.users()) {
-          if (auto call = dyn_cast<CallInst>(use)) {
+        for (const auto& use : a.users()) {
+          if (const auto& call = dyn_cast<CallInst>(use)) {
             if (call->getCalledValue() != &a) continue;
             call->setCalledFunction(myFunToInline);
           }
@@ -273,16 +285,8 @@ static void* indirect_inline_generator(Function* F,
   pmb.OptLevel = 3;
   pmb.populateModulePassManager(*PM.get());
 
-  // we gotta be fast, use a small number of passes
-  // but, we also need to make sure that the new thing is fast enough to be
-  // worth the time spent in the generator
-  /* PM->add(createInstructionCombiningPass()); */
-  /* PM->add(createAggressiveDCEPass()); */
-  /* PM->add(createCFGSimplificationPass()); */
-  /* PM->add(createLoopSimplifyPass()); */
-  /* PM->add(createLoopDeletionPass()); */
-  /* PM->add(createLoopIdiomPass()); */
-  /* PM->add(createCFGSimplificationPass()); */
+  // for some reason we seem to often need this at the end
+  PM->add(createCFGSimplificationPass());
 
   PM->run(*mod);
   errs() << "post pm: " << *mod << "\n";
@@ -299,18 +303,9 @@ static void* indirect_inline_generator(Function* F,
 bool OsrPass::runOnModule( Module &M ) {
   bool flag = false;
   for (auto &F : M) {
-    size_t counter = 0;
-    for (auto& arg: F.getArgumentList()) {
-      auto ty = arg.getType();
-      if (!ty->isPointerTy())                           continue;
-      if (!ty->getPointerElementType()->isFunctionTy()) continue;
-
-      counter++;
-    }
-
-    if (counter > 0)
-      flag = runOnFunction(F) || flag;
+    flag = runOnFunction(F) || flag;
   }
+
   return flag;
 }
 
@@ -329,16 +324,31 @@ bool OsrPass::runOnFunction( Function &F )
   // get all the live vars before we fiddle with anything
   LivenessAnalysis live(&F);
   auto relevantLiveVars = std::map<const Loop*, std::set<const Value*>*>();
-  for (auto Loop : LI) {
+  for (auto& Loop : LI) {
     relevantLiveVars[Loop] = new std::set<const Value*>();
-    for (auto var : live.getLiveOutValues(Loop->getHeader())) {
+    for (auto& var : live.getLiveOutValues(Loop->getHeader())) {
       relevantLiveVars[Loop]->insert(var);
     }
   }
 
+  // check that one of the live vars is an fp
+  size_t nfps = 0;
+  for (auto& lv : relevantLiveVars) {
+    for (auto& vs : *lv.second) {
+      const auto& ty = vs->getType();
+      if (!ty->isPointerTy())                           continue;
+      if (!ty->getPointerElementType()->isFunctionTy()) continue;
+      nfps++;
+    }
+  }
+
+  if (nfps == 0) {
+    return false;
+  }
+
   // for every loop, add the osr instrumentation
   size_t osrcounter = 0;
-  for (auto Loop : LI) {
+  for (auto& Loop : LI) {
     // create an osr block for each loop in the function
     std::string osrname = "osr" + std::to_string(osrcounter++);
     BasicBlock* osrBB = BasicBlock::Create(getGlobalContext(), osrname, &F);
@@ -352,11 +362,16 @@ bool OsrPass::runOnFunction( Function &F )
     if (!cond) continue;
 
     // create the osr stub code
-    // danger, here be dragons
-    // first, get the values of every argument which is a function pointer
+    // get an fp to a new function which takes all of our live vars
+    // as args and returns the same thing as the original function.
+    // we return the result of a call to this function
+
+    std::vector<Type*> cont_args_types;
+    std::vector<Value*> cont_args_values;
+
     size_t nfps = 0;
-    for (auto& arg: F.getArgumentList()) {
-      auto ty = arg.getType();
+    for (auto& v : *relevantLiveVars[Loop]) {
+      const auto& ty = v->getType();
       if (!ty->isPointerTy())                           continue;
       if (!ty->getPointerElementType()->isFunctionTy()) continue;
       nfps++;
@@ -367,8 +382,11 @@ bool OsrPass::runOnFunction( Function &F )
     auto array = OsrBuilder.CreateAlloca(atype, 0);
 
     size_t counter = 0;
-    for (auto& arg: F.getArgumentList()) {
-      auto ty = arg.getType();
+    for (auto& v : *relevantLiveVars[Loop]) {
+      cont_args_types.push_back(v->getType());
+      cont_args_values.push_back(const_cast<Value*>(v));
+
+      const auto& ty = v->getType();
       if (!ty->isPointerTy())                           continue;
       if (!ty->getPointerElementType()->isFunctionTy()) continue;
 
@@ -378,26 +396,11 @@ bool OsrPass::runOnFunction( Function &F )
       auto el = OsrBuilder.CreateGEP(array, args);
 
       // pass the address of the function being called
-      auto val = OsrBuilder.CreateBitCast(&arg, Type::getInt8PtrTy(F.getContext()));
+      auto val = OsrBuilder.CreateBitCast(const_cast<Value*>(v), Type::getInt8PtrTy(F.getContext()));
 
       OsrBuilder.CreateStore(val, el);
     }
     assert(counter == nfps);
-
-    // now we need to get an fp to a new function which takes all of our live vars
-    // as args and returns the same thing as the original function.
-    // we return the result of a call to this function
-
-    // types for continuation func
-    std::vector<Type*> cont_args_types;
-    for (auto v : *relevantLiveVars[Loop]) {
-      cont_args_types.push_back(v->getType());
-    }
-
-    std::vector<Value*> cont_args_values;
-    for (auto v : *relevantLiveVars[Loop]) {
-      cont_args_values.push_back(const_cast<Value*>(v));
-    }
 
     auto cont_ret      = F.getReturnType();
     auto cont_type     = FunctionType::get(cont_ret, cont_args_types, false);
