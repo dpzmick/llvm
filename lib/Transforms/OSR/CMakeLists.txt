@@ -10,3 +10,5 @@ add_llvm_library(LLVMOsr
   ADDITIONAL_HEADER_DIRS
   ${LLVM_MAIN_INCLUDE_DIR}/llvm/Transforms/OSR
   )
+
+add_dependencies(LLVMOsr intrinsics_gen)
