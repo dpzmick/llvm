@@ -26,7 +26,7 @@ namespace llvm {
   class OsrPass : public ModulePass {
   public:
     static char ID; // Pass identification
-    explicit OsrPass(MCJITWrapper *MC = nullptr);
+    explicit OsrPass(MCJITWrapper *MC = nullptr, bool dump_ir = false);
 
     bool runOnModule(Module&) override;
 
@@ -38,6 +38,7 @@ namespace llvm {
 
   private:
     MCJITWrapper* MC;
+    bool dump_ir;
 
     // adds a loop counter to a loop
     // this should become it's own loop pass or something (doesn't seem to already
@@ -53,7 +54,7 @@ namespace llvm {
 
   };
 
-  ModulePass* createOsrPassPass(MCJITWrapper* MC);
+  ModulePass* createOsrPassPass(MCJITWrapper* MC, bool dump_ir);
   void initializeOsrPassPass(PassRegistry&);
 }
 

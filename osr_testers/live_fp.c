@@ -53,8 +53,8 @@ int func(int flag) {
 }
 
 int main() {
-  func(1);
-  func(2);
-  func(3);
+  printf("%d\n", func(1));
+  printf("%d\n", func(2));
+  printf("%d\n", func(3));
   return 0;
 }

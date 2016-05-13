@@ -84,6 +84,8 @@ void do_without_osr(char** argv) {
   // the hackery that makes the osr possible
   Owner->setDataLayout(EE->getDataLayout());
 
+  std::clock_t start1 = std::clock();
+
   // make a pass manager
   auto PM = llvm::make_unique<legacy::PassManager>();
   PM->add(createPromoteMemoryToRegisterPass());
@@ -99,10 +101,13 @@ void do_without_osr(char** argv) {
   auto fp = (int (*)(void))EE->getPointerToFunction(Main);
   std::clock_t start = std::clock();
   fp();
-  errs() << "without osr time: " << std::clock() - start << "\n";
+
+  auto c = std::clock();
+  errs() << "without osr time: " << c - start << "\n";
+  errs() << "without osr total time: " << c - start1 << "\n";
 }
 
-void do_with_osr(char** argv) {
+void do_with_osr(char** argv, bool dump_ir, bool do_timing) {
   LLVMContext &Context = getGlobalContext();
   SMDiagnostic Err;
 
@@ -136,12 +141,15 @@ void do_with_osr(char** argv) {
 
   MCJITWrapper wrapper(EE);
 
+  std::clock_t start1 = std::clock();
+
   // make a pass manager
   auto PM = llvm::make_unique<legacy::PassManager>();
   PM->add(createPromoteMemoryToRegisterPass());
   PM->add(createInstructionCombiningPass());
   PM->add(createCFGSimplificationPass());
-  PM->add(createOsrPassPass(&wrapper));
+  PM->add(createLICMPass());
+  PM->add(createOsrPassPass(&wrapper, dump_ir));
   PM->run(*Mod);
 
   wrapper.addModule(std::move(Owner));
@@ -150,7 +158,12 @@ void do_with_osr(char** argv) {
   auto fp = (int (*)(void))EE->getPointerToFunction(Main);
   std::clock_t start = std::clock();
   fp();
-  errs() << "osr time: " << std::clock() - start << "\n";
+
+  if (do_timing) {
+    auto c = std::clock();
+    errs() << "osr execution time: " << c - start << "\n";
+    errs() << "osr total time: " << c - start1 << "\n";
+  }
 }
 
 int main(int argc, char **argv, char * const *envp) {
@@ -164,7 +177,8 @@ int main(int argc, char **argv, char * const *envp) {
   InitializeNativeTargetAsmParser();
 
   do_without_osr(argv);
-  do_with_osr(argv);
+  do_with_osr(argv, true, false); // dump the ir this time
+  do_with_osr(argv, false, true); // dump the ir this time
 
   return 0;
 }

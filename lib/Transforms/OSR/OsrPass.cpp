@@ -1,4 +1,5 @@
 #include "llvm/Analysis/LoopInfo.h"
+#include "llvm/Bitcode/ReaderWriter.h"
 #include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/TypeBuilder.h"
 #include "llvm/IR/ValueMap.h"
@@ -27,17 +28,18 @@ using namespace llvm;
 
 char OsrPass::ID = 0;
 
-ModulePass* llvm::createOsrPassPass(MCJITWrapper* MC) {
-  return new OsrPass(MC);
+ModulePass* llvm::createOsrPassPass(MCJITWrapper* MC, bool dump_ir) {
+  return new OsrPass(MC, dump_ir);
 }
 
 INITIALIZE_PASS_BEGIN(OsrPass, "osr", "osr", false, false)
 INITIALIZE_PASS_DEPENDENCY(LoopInfoWrapperPass)
 INITIALIZE_PASS_END(OsrPass, "osr", "osr", false, false)
 
-OsrPass::OsrPass(MCJITWrapper *MC)
+OsrPass::OsrPass(MCJITWrapper *MC, bool dump_ir)
 : ModulePass(ID),
-  MC(MC)
+  MC(MC),
+  dump_ir(dump_ir)
 {
   assert(MC);
   initializeOsrPassPass(*PassRegistry::getPassRegistry());
@@ -216,7 +218,8 @@ static void* indirect_inline_generator(Function* F,
                                        std::set<const Value*>* vars,
                                        // pointer to array of pointers of
                                        // function pointer argument values
-                                       void** fp_arg_values)
+                                       void** fp_arg_values,
+                                       bool dump_ir)
 {
   // first, figure out what it is we want to fiddle around with
   // each arg has a corresponding element in the fp_args_values array
@@ -289,7 +292,15 @@ static void* indirect_inline_generator(Function* F,
   PM->add(createCFGSimplificationPass());
 
   PM->run(*mod);
-  errs() << "post pm: " << *mod << "\n";
+
+  if (dump_ir) {
+    std::error_code ec;
+    raw_fd_ostream out(
+        F->getParent()->getName().str() + "_osr_module" + std::to_string(mod_count) + ".bc",
+        ec, sys::fs::F_None);
+
+    WriteBitcodeToFile(mod, out);
+  }
 
   MC->addModule(std::move(M));
 
@@ -304,6 +315,15 @@ bool OsrPass::runOnModule( Module &M ) {
   bool flag = false;
   for (auto &F : M) {
     flag = runOnFunction(F) || flag;
+  }
+
+  if (dump_ir) {
+    std::error_code ec;
+    raw_fd_ostream out(
+        M.getName().str() + "_after_pass.bc",
+        ec, sys::fs::F_None);
+
+    WriteBitcodeToFile(&M, out);
   }
 
   return flag;
@@ -413,6 +433,7 @@ bool OsrPass::runOnFunction( Function &F )
     stub_args_types.push_back(voidPtr);
     // this is a bit abusive. Then again, all of this code is that way
     stub_args_types.push_back(array->getType());
+    stub_args_types.push_back(Type::getInt1Ty(getGlobalContext()));
 
     std::vector<Value*> stub_args_values;
     stub_args_values.push_back(
@@ -439,6 +460,9 @@ bool OsrPass::runOnFunction( Function &F )
           ));
 
     stub_args_values.push_back(array);
+
+    stub_args_values.push_back(
+        ConstantInt::get(Type::getInt1Ty(getGlobalContext()), true));
 
     auto stub_ret      = Type::getInt8PtrTy(F.getContext());
     auto stub_type     = FunctionType::get(stub_ret, stub_args_types, false);
