@@ -462,7 +462,7 @@ bool OsrPass::runOnFunction( Function &F )
     stub_args_values.push_back(array);
 
     stub_args_values.push_back(
-        ConstantInt::get(Type::getInt1Ty(getGlobalContext()), true));
+        ConstantInt::get(Type::getInt1Ty(getGlobalContext()), dump_ir));
 
     auto stub_ret      = Type::getInt8PtrTy(F.getContext());
     auto stub_type     = FunctionType::get(stub_ret, stub_args_types, false);
