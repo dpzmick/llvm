@@ -19,5 +19,5 @@
 type = Library
 name = Osr
 parent = Transforms
-library_name = OsrOpts
-required_libraries = Analysis Core Support
+library_name = Osr
+required_libraries = Analysis Core InstCombine Support TransformUtils
