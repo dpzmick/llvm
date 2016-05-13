@@ -10,11 +10,8 @@ int isord(long* v, long n, int (*c)(void* a, void* b)) {
   return 1;
 }
 
-int comp2(void *a, void *b) {
-  long ia = *(long*)a;
-  long ib = *(long*)b;
-
-  return ia <= ib;
+int comp1(void *a, void *b) {
+  return 1;
 }
 
 int main() {
@@ -24,7 +21,8 @@ int main() {
   void* a = malloc(1); free(a);
   printf("running isord test\n");
 
-  assert(isord(arr, max, comp2) == 1); // should osr
+  assert(isord(arr, 100, comp1) == 1); // should not do osr
+  assert(isord(arr, max, comp1) == 1); // should osr and comp -> ret 1
   printf("passed\n");
 }
 
