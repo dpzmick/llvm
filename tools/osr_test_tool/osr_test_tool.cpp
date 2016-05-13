@@ -148,7 +148,6 @@ void do_with_osr(char** argv, bool dump_ir, bool do_timing) {
   PM->add(createPromoteMemoryToRegisterPass());
   PM->add(createInstructionCombiningPass());
   PM->add(createCFGSimplificationPass());
-  PM->add(createLICMPass());
   PM->add(createOsrPassPass(&wrapper, dump_ir));
   PM->run(*Mod);
 
