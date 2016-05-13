@@ -10,3 +10,6 @@ all: $(TESTS:%=run_%)
 
 run_%: %.ll
 	../build/bin/osr_test_tool $^
+
+clean:
+	rm *.ll *.bc
