@@ -24,7 +24,9 @@ cmake -G Ninja -DLLVM_ENABLE_FFI=true -DCMAKE_BUILD_TYPE=Debug ../
 check out llvm, check out clang in llvm/tools
 in clang dir, switch to release 3.8
 
+```
 module load python/2.7.10-x86_64
 module load cmake.3.5.0
 module load gcc/<TAB>
 CC=/software/gcc-4.8.2/bin/gcc CXX=/software/gcc-4.8.2/bin/g++ cmake -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release ../
+```
